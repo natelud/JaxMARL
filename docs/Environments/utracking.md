@@ -6,7 +6,7 @@ Policies trained in UTracking can be **directly deployed and evaluated** in Gaze
 
 ## Environment Overview
 
-![](../../../docs/imgs/utracking_3v3.gif)
+![UTracking 3v3 Demo](/docs/imgs/utracking_3v3.gif)
 
 ### Goal
 Learn decentralized policies that allow multiple agents to:
