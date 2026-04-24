@@ -10,7 +10,7 @@ from jaxmarl.environments.overcooked.common import OBJECT_TO_INDEX, COLOR_TO_IND
 INDEX_TO_COLOR = [k for k,v in COLOR_TO_INDEX.items()]
 TILE_PIXELS = 32
 
-COLOR_TO_AGENT_INDEX = {0:0, 2:1} # Hardcoded. Red is first, blue is second
+COLOR_TO_AGENT_INDEX = {i*2: i for i in range(16)}  # agent_idx = color_idx // 2
 
 class OvercookedVisualizer:
 	"""
