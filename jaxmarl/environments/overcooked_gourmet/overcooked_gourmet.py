@@ -136,6 +136,7 @@ class GourmetOvercooked(MultiAgentEnv):
         instantaneous_cook: bool = False,
         expanded_actions: bool = False,
         recipe_db_path: Optional[str] = None,
+        layout_seed: int = 0,
     ):
         super().__init__(num_agents=num_agents)
 
@@ -164,6 +165,7 @@ class GourmetOvercooked(MultiAgentEnv):
         self.instantaneous_cook = instantaneous_cook
         self.expanded_actions   = expanded_actions
         self.agent_view_size    = 5
+        self._layout_seed       = layout_seed
 
         self._max_cook_time = float(max(TOOL_COOK_TIMES.tolist()))
 
@@ -195,7 +197,7 @@ class GourmetOvercooked(MultiAgentEnv):
         self._cached_resets: list = []
         dummy_key = jax.random.PRNGKey(0)
         for rid in self._allowed:
-            obs, st = self._reset_for_recipe(dummy_key, rid)
+            obs, st = self._reset_for_recipe(dummy_key, rid, self._layout_seed)
             self._cached_resets.append((obs, st))
 
     # ────────────────────────────────────────────────────────────────────────
@@ -255,7 +257,25 @@ class GourmetOvercooked(MultiAgentEnv):
         pick = jax.random.randint(rk, (), 0, len(self._cached_resets))
         return jax.lax.switch(pick, [lambda r=r: r for r in self._cached_resets])
 
-    def _reset_for_recipe(self, key, recipe_idx: int):
+    def rebuild_layouts(self, layout_seed: int) -> None:
+        """
+        Rebuild cached reset states with a new layout seed.
+
+        Call this between training updates to randomize tool and dispenser
+        positions.  After calling this, recreate any jax.jit-compiled functions
+        that close over env.reset or env.step so they pick up the new layouts.
+        """
+        self._layout_seed = layout_seed
+        dummy_key = jax.random.PRNGKey(0)
+        self._cached_resets = []
+        for rid in self._allowed:
+            obs, st = self._reset_for_recipe(dummy_key, rid, layout_seed)
+            self._cached_resets.append((obs, st))
+
+    def _reset_for_recipe(self, key, recipe_idx: int, layout_seed: int = 0):
+        # Per-recipe RNG: different recipes get independent shuffles for the same seed.
+        rng_np = np.random.RandomState((layout_seed, recipe_idx))
+
         H, W = FIXED_H, FIXED_W
         recipe = self._all_recipes[recipe_idx]
         unique_ingrs = self._rec_unique_ingrs[recipe_idx]
@@ -266,14 +286,30 @@ class GourmetOvercooked(MultiAgentEnv):
         grid[2:4, 1:W-1] = 0
 
         n_disp  = min(len(unique_ingrs), MAX_DISP, W - 3)
-        disp_xs = list(range(1, 1 + n_disp))
-        pp_x    = min(1 + n_disp, W - 3)
-        goal_x  = min(pp_x + 1, W - 2)
-        top_y   = 1
-
         n_tools = min(n_comps, MAX_TOOLS, W - 2)
-        tool_xs = list(range(1, 1 + n_tools))
+        top_y   = 1
         bot_y   = 4
+
+        # --- Randomised placement using layout_seed ---
+        # Top row: assign n_disp dispensers + plate pile + goal to random columns
+        all_cols  = list(range(1, W - 1))
+        n_top     = n_disp + 2
+        top_cols  = rng_np.choice(all_cols, size=n_top, replace=False).tolist()
+        rng_np.shuffle(top_cols)          # randomise which item occupies which column
+        disp_xs   = top_cols[:n_disp]
+        pp_x      = top_cols[n_disp]
+        goal_x    = top_cols[n_disp + 1]
+
+        # Shuffle which ingredient sits in which dispenser slot
+        ingr_ids = list(unique_ingrs[:n_disp])
+        rng_np.shuffle(ingr_ids)
+
+        # Bottom row: pick n_tools random columns; shuffle which component/tool goes where
+        bot_cols   = rng_np.choice(all_cols, size=n_tools, replace=False).tolist()
+        comp_order = list(range(min(n_comps, n_tools)))
+        rng_np.shuffle(comp_order)
+        tool_xs        = bot_cols
+        shuffled_comps = [comps[ci] for ci in comp_order]
 
         wall_map = grid.astype(bool)
 
@@ -285,7 +321,7 @@ class GourmetOvercooked(MultiAgentEnv):
         disp_pos       = np.zeros((MAX_DISP, 2), dtype=np.int32)
         disp_ingr      = np.full((MAX_DISP,), -1, dtype=np.int32)
         disp_active    = np.zeros((MAX_DISP,), dtype=bool)
-        for i, (xi, ingr_id) in enumerate(zip(disp_xs, unique_ingrs)):
+        for i, (xi, ingr_id) in enumerate(zip(disp_xs, ingr_ids)):
             disp_pos[i]    = [xi, top_y]
             disp_ingr[i]   = ingr_id
             disp_active[i] = True
@@ -295,10 +331,10 @@ class GourmetOvercooked(MultiAgentEnv):
         tool_comp_idx  = np.full((MAX_TOOLS,), -1, dtype=np.int32)
         tool_active    = np.zeros((MAX_TOOLS,), dtype=bool)
         tool_needed_n  = np.zeros((MAX_TOOLS,), dtype=np.int32)
-        for i, (xi, comp) in enumerate(zip(tool_xs, comps)):
+        for i, (xi, comp) in enumerate(zip(tool_xs, shuffled_comps)):
             tool_pos[i]      = [xi, bot_y]
             tool_type_arr[i] = comp["tool_type"]
-            tool_comp_idx[i] = i
+            tool_comp_idx[i] = comp_order[i]   # which recipe component this slot handles
             tool_active[i]   = True
             tool_needed_n[i] = comp["n_ingredients"]
 
