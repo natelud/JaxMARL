@@ -518,7 +518,7 @@ def load(name_or_path: str, seed: int = 0, num_agents: int = 2) -> FrozenDict:
     FrozenDict layout (standard or gourmet, auto-detected from ITEMS)
     """
     import importlib.util
-
+    
     if os.path.isfile(name_or_path):
         path = name_or_path
     else:
