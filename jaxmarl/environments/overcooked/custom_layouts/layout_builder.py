@@ -1,6 +1,5 @@
 """
-layout_builder.py — Random-placement kitchen layout builder for Overcooked
-and GourmetOvercooked.
+layout_builder.py — Kitchen layout builder for Overcooked and GourmetOvercooked.
 
 Usage
 -----
@@ -13,7 +12,6 @@ Each layout file defines up to three module-level variables:
              "all"       — any recipe (default when key is absent)
              int         — a single recipe ID
              list[int]   — a set of recipe IDs
-             list[str]   — recipe names looked up against the DB at load time
 
 Standard Overcooked item types:
   "pot"           — cooking pot counter
@@ -22,53 +20,87 @@ Standard Overcooked item types:
   "goal"          — delivery goal (serving window)
 
 GourmetOvercooked item types:
-  "dispenser"     — ingredient dispenser (use ingredient_id to pin a specific
-                    ingredient; omit for a generic slot assigned at recipe load)
-  "cutting_board" — cutting-board tool station
-  "pot"           — pot tool station  (in gourmet mode)
-  "pan"           — pan tool station
-  "oven"          — oven tool station
-  "blender"       — blender tool station
-  "mixing_bowl"   — mixing-bowl tool station
-  "grill"         — grill tool station
+  "dispenser"     — ingredient dispenser
+  "cutting_board", "pot", "pan", "oven", "blender", "mixing_bowl", "grill"
+                  — tool stations
   "plate_pile"    — clean-plate dispenser  (same as standard)
   "goal"          — delivery goal          (same as standard)
 
-The builder auto-detects gourmet mode whenever any gourmet-specific item
-("dispenser" or any tool type other than plain "pot") appears in the list.
-It then returns a FrozenDict compatible with GourmetOvercooked instead of
-the standard Overcooked format.
+──────────────────────────────────────────────────────────────────────────────
+Specifying ingredients for dispensers
+──────────────────────────────────────────────────────────────────────────────
+Three ways to populate ingredient dispensers, in increasing convenience:
 
-The RECIPES value is stored in the FrozenDict under the "recipe_ids" key
-(Python string/list, not a JAX array).  Pass it straight to GourmetOvercooked:
+  1. Pin a single ingredient (existing syntax):
+       {"type": "dispenser", "ingredient_id": 96}     # one chicken dispenser
 
-    layout = load("my_kitchen", seed=0)
-    env = GourmetOvercooked(recipe_ids=layout["recipe_ids"], ...)
+  2. Pin a list of ingredients (shorthand):
+       {"type": "dispenser", "ingredient_ids": [96, 50, 336]}  # expands to 3
 
-Example — standard layout file:
-    GRID  = \"\"\"...\"\"\"
+  3. Auto-derive all ingredients from the active recipe(s) (requires RECIPES
+     to be an int or list[int], not "all"):
+       {"type": "dispenser", "from_recipe": True}
+       # expands to one pinned dispenser per unique ingredient in RECIPES
+
+  If none of the above are given, count= generic dispensers are created
+  (ingredient assigned at recipe-load time by the environment).
+
+──────────────────────────────────────────────────────────────────────────────
+Fixing item positions
+──────────────────────────────────────────────────────────────────────────────
+Add "pos": (row, col) to any item entry to place it at an exact grid cell
+instead of randomly.  The target cell must be an eligible counter cell (a 'W'
+in the grid that is adjacent to at least one walkable floor cell).
+
+  {"type": "pot",           "pos": (2, 3)}   # pot fixed at row 2, col 3
+  {"type": "cutting_board", "pos": (2, 7)}
+  {"type": "dispenser",     "ingredient_id": 96, "pos": (0, 4)}
+
+"pos" applies only to single-item entries (count=1).  For count > 1 without
+"pos", all copies are randomly placed.  To fix multiple items of the same type
+at different positions, list them as separate entries.
+
+Items without "pos" are placed randomly in the remaining counter cells.
+
+──────────────────────────────────────────────────────────────────────────────
+Examples
+──────────────────────────────────────────────────────────────────────────────
+Standard layout (no RECIPES):
+    GRID  = "..."
     ITEMS = [
         {"type": "onion_pile", "count": 2},
         {"type": "pot",        "count": 1},
         {"type": "plate_pile", "count": 1},
         {"type": "goal",       "count": 1},
     ]
-    # no RECIPES → standard Overcooked, field not added
 
-Example — gourmet layout file:
-    GRID  = \"\"\"...\"\"\"
+Gourmet layout — auto-derive all recipe ingredients:
+    GRID  = "..."
     ITEMS = [
-        {"type": "dispenser",     "count": 3},
+        {"type": "dispenser",     "from_recipe": True},  # all ingredients
         {"type": "cutting_board", "count": 1},
-        {"type": "pan",           "count": 2},
+        {"type": "pot",           "count": 1},
         {"type": "plate_pile",    "count": 1},
-        {"type": "goal",          "count": 2},
+        {"type": "goal",          "count": 1},
     ]
-    RECIPES = [5, 42]      # only reward from recipe 5 or 42
-    # or: RECIPES = "all"  # reward from any recipe
+    RECIPES = 49
+
+Gourmet layout — explicit ingredients with fixed tool positions:
+    GRID  = "..."
+    ITEMS = [
+        {"type": "dispenser", "ingredient_ids": [96, 50, 336, 254]},
+        {"type": "pot",           "pos": (2, 3)},
+        {"type": "cutting_board", "pos": (2, 7)},
+        {"type": "plate_pile",    "count": 1},
+        {"type": "goal",          "count": 1},
+    ]
+    RECIPES = 49
 """
 
+import json
+import os
 import random
+
 import numpy as np
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
@@ -78,12 +110,10 @@ from flax.core.frozen_dict import FrozenDict
 # Item-type catalogues
 # ---------------------------------------------------------------------------
 
-# Standard Overcooked items
 _STANDARD_ITEM_TYPES = {"pot", "onion_pile", "plate_pile", "goal"}
 
-# GourmetOvercooked tool names → tool-type integer (matches TOOL_* constants
-# in common_gourmet.py: cutting_board=0, pot=1, pan=2, oven=3,
-# blender=4, mixing_bowl=5, grill=6)
+# GourmetOvercooked tool names → tool-type integer
+# (cutting_board=0, pot=1, pan=2, oven=3, blender=4, mixing_bowl=5, grill=6)
 _TOOL_NAME_TO_INT = {
     "cutting_board": 0,
     "pot":           1,
@@ -94,15 +124,128 @@ _TOOL_NAME_TO_INT = {
     "grill":         6,
 }
 
-# Items that unambiguously signal gourmet mode.
-# "pot" is NOT included here: it appears in both standard ("pot_idx") and
-# gourmet (TOOL_POT in tool_slots); the presence of "dispenser" or any
-# non-pot tool is the trigger for gourmet mode.
+# Items that unambiguously signal gourmet mode.  "pot" is intentionally absent:
+# it appears in both standard and gourmet; a non-pot gourmet item triggers it.
 _GOURMET_TRIGGER_TYPES = {"dispenser", "cutting_board", "pan", "oven",
                           "blender", "mixing_bowl", "grill"}
 
-# All valid item types across both modes
 ALL_ITEM_TYPES = _STANDARD_ITEM_TYPES | _GOURMET_TRIGGER_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Recipe DB helpers  (used only when from_recipe=True)
+# ---------------------------------------------------------------------------
+
+_RECIPE_DB_CACHE: dict | None = None
+
+
+def _load_recipe_db() -> dict:
+    """
+    Find and load data/gourmet_recipe_db.json by walking up from this file.
+    Result is cached after the first load.
+    """
+    global _RECIPE_DB_CACHE
+    if _RECIPE_DB_CACHE is not None:
+        return _RECIPE_DB_CACHE
+
+    search = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(8):
+        candidate = os.path.join(search, "data", "gourmet_recipe_db.json")
+        if os.path.isfile(candidate):
+            with open(candidate) as fh:
+                _RECIPE_DB_CACHE = json.load(fh)
+            return _RECIPE_DB_CACHE
+        search = os.path.dirname(search)
+
+    raise FileNotFoundError(
+        "Cannot locate data/gourmet_recipe_db.json anywhere above "
+        f"{os.path.dirname(os.path.abspath(__file__))}. "
+        "Pass recipe_db= explicitly to build()."
+    )
+
+
+def _ingredients_from_recipes(recipes, recipe_db: dict) -> list:
+    """Return sorted list of unique ingredient_ids for the given recipes."""
+    if recipes == "all":
+        raise ValueError(
+            'Cannot auto-derive ingredients when RECIPES="all". '
+            "Set RECIPES to an int or list[int], or list ingredient_ids manually."
+        )
+    ids = [recipes] if isinstance(recipes, int) else list(recipes)
+    seen: set = set()
+    for rid in ids:
+        for comp in recipe_db["recipes"][rid]["components"]:
+            for ingr in comp["ingredients"]:
+                seen.add(ingr["ingredient_id"])
+    return sorted(seen)
+
+
+# ---------------------------------------------------------------------------
+# Item expansion
+# ---------------------------------------------------------------------------
+
+def _expand_items(items: list, recipes, recipe_db=None) -> list:
+    """
+    Flatten the ITEMS list into a list of (type, ingredient_id, pos) triples.
+
+    pos is a (row, col) tuple or None (randomly placed).
+    ingredient_id is an int or None (generic dispenser).
+    """
+    flat = []  # list of (type_str, ingredient_id_or_None, pos_or_None)
+    _db = recipe_db
+
+    for item in items:
+        t = item["type"]
+        if t not in ALL_ITEM_TYPES:
+            raise ValueError(
+                f"Unknown item type: {t!r}. "
+                f"Valid types: {sorted(ALL_ITEM_TYPES)}"
+            )
+        pos = item.get("pos", None)  # (row, col) or None
+
+        if t == "dispenser":
+            if "ingredient_ids" in item:
+                # Shorthand list — each ID becomes one randomly-placed dispenser.
+                # pos is not meaningful here (ambiguous for multiple items).
+                if pos is not None:
+                    raise ValueError(
+                        '"pos" cannot be combined with "ingredient_ids" (ambiguous '
+                        "for multiple items). List them as separate entries instead."
+                    )
+                for iid in item["ingredient_ids"]:
+                    flat.append((t, iid, None))
+            elif item.get("from_recipe", False):
+                if _db is None:
+                    _db = _load_recipe_db()
+                if pos is not None:
+                    raise ValueError(
+                        '"pos" cannot be combined with "from_recipe" (number of '
+                        "ingredients is not known at layout-definition time). "
+                        "List individual dispensers with explicit ingredient_id instead."
+                    )
+                for iid in _ingredients_from_recipes(recipes, _db):
+                    flat.append((t, iid, None))
+            else:
+                count = item.get("count", 1)
+                iid = item.get("ingredient_id", None)
+                if pos is not None and count != 1:
+                    raise ValueError(
+                        f'"pos" requires count=1 (got count={count}). '
+                        "List multiple fixed-position items as separate entries."
+                    )
+                for _ in range(count):
+                    flat.append((t, iid, pos if count == 1 else None))
+        else:
+            count = item.get("count", 1)
+            if pos is not None and count != 1:
+                raise ValueError(
+                    f'"pos" requires count=1 (got count={count} for type={t!r}). '
+                    "List multiple fixed-position items as separate entries."
+                )
+            for _ in range(count):
+                flat.append((t, None, pos if count == 1 else None))
+
+    return flat
 
 
 # ---------------------------------------------------------------------------
@@ -115,26 +258,24 @@ def build(
     seed: int = 0,
     num_agents: int = 2,
     recipes=None,
+    recipe_db: dict | None = None,
 ) -> FrozenDict:
     """
-    Parse `grid` for walls/floors/agent-spawns, then randomly place `items`
-    on eligible counter cells.
+    Parse `grid` for walls/floors/agent-spawns, then place `items` on counters.
 
     Parameters
     ----------
     grid       : multiline string; 'W'=counter, ' '=floor, 'A'=agent spawn
-    items      : list of dicts, each with 'type' and optional 'count' /
-                 'ingredient_id' (dispenser only)
-    seed       : RNG seed for reproducible random placement
+    items      : list of item dicts (see module docstring for full syntax)
+    seed       : RNG seed for randomly-placed items
     num_agents : how many agent spawns to ensure
     recipes    : "all" | int | list[int] — which GourmetOvercooked recipes
-                 earn reward.  Stored as layout["recipe_ids"].
-                 Pass None (default) to omit the key (standard Overcooked).
+                 earn reward.  Required when any item uses from_recipe=True.
+    recipe_db  : pre-loaded recipe DB dict (optional; auto-loaded if needed)
 
     Returns
     -------
-    FrozenDict layout compatible with Overcooked (standard items only) or
-    GourmetOvercooked (when gourmet items are present).
+    FrozenDict layout compatible with Overcooked or GourmetOvercooked.
     """
     rng = random.Random(seed)
 
@@ -143,10 +284,10 @@ def build(
     W = max(len(r) for r in rows)
     rows = [r.ljust(W) for r in rows]
 
-    # ── Parse the grid ──────────────────────────────────────────────────────
-    wall_cells   = set()
-    floor_cells  = set()
-    agent_spawns = []
+    # ── Parse grid ─────────────────────────────────────────────────────────────
+    wall_cells:   set = set()
+    floor_cells:  set = set()
+    agent_spawns: list = []
 
     for y, row in enumerate(rows):
         for x, ch in enumerate(row):
@@ -158,68 +299,77 @@ def build(
             elif ch == "A":
                 floor_cells.add(idx)
                 agent_spawns.append(idx)
-            elif ch != " ":
+            else:
                 wall_cells.add(idx)
 
-    # ── Find eligible counter cells (wall cells adjacent to a floor cell) ───
     def neighbors(idx):
         y, x = divmod(idx, W)
-        for dy, dx in [(-1,0),(1,0),(0,-1),(0,1)]:
-            ny, nx = y+dy, x+dx
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            ny, nx = y + dy, x + dx
             if 0 <= ny < H and 0 <= nx < W:
                 yield ny * W + nx
 
-    counter_cells = [
-        c for c in wall_cells
-        if any(n in floor_cells for n in neighbors(c))
-    ]
+    counter_cells_set = {
+        c for c in wall_cells if any(n in floor_cells for n in neighbors(c))
+    }
+    counter_cells = list(counter_cells_set)
+    rng.shuffle(counter_cells)
 
     if not counter_cells:
         raise ValueError("No counter cells found adjacent to floor cells.")
 
-    rng.shuffle(counter_cells)
-    available = list(counter_cells)
+    # ── Expand ITEMS ───────────────────────────────────────────────────────────
+    flat_items = _expand_items(items, recipes, recipe_db)
 
-    # ── Expand and validate items list ──────────────────────────────────────
-    # Each element is (type_str, ingredient_id_or_None)
-    flat_items = []
-    is_gourmet = False
-
-    for item in items:
-        t = item["type"]
-        if t not in ALL_ITEM_TYPES:
-            raise ValueError(
-                f"Unknown item type: {t!r}. "
-                f"Valid types: {sorted(ALL_ITEM_TYPES)}"
-            )
-        if t in _GOURMET_TRIGGER_TYPES:
-            is_gourmet = True
-        count = item.get("count", 1)
-        ingr_id = item.get("ingredient_id", None)
-        flat_items.extend([(t, ingr_id)] * count)
-
-    # In gourmet mode, plain "pot" is a tool; warn if "onion_pile" is used.
+    is_gourmet = any(t in _GOURMET_TRIGGER_TYPES for t, _, _ in flat_items)
     if is_gourmet:
-        for t, _ in flat_items:
+        for t, _, _ in flat_items:
             if t == "onion_pile":
                 raise ValueError(
                     "'onion_pile' is not valid in gourmet mode. "
                     "Use 'dispenser' (with optional ingredient_id) instead."
                 )
 
-    if len(flat_items) > len(available):
+    # ── Separate fixed-position items from randomly-placed ones ───────────────
+    fixed: list  = []   # (type, ingr_id, flat_idx)
+    random_items = []   # (type, ingr_id)
+    used_pos: set = set()
+
+    for t, ingr_id, pos in flat_items:
+        if pos is not None:
+            r, c = pos
+            flat_idx = r * W + c
+            if flat_idx not in counter_cells_set:
+                raise ValueError(
+                    f"pos=({r},{c}) for item type={t!r} is not an eligible counter "
+                    f"cell (flat index {flat_idx}). The cell must be a 'W' that is "
+                    "adjacent to at least one walkable floor cell."
+                )
+            if flat_idx in used_pos:
+                raise ValueError(
+                    f"pos=({r},{c}) is assigned to more than one item."
+                )
+            used_pos.add(flat_idx)
+            fixed.append((t, ingr_id, flat_idx))
+        else:
+            random_items.append((t, ingr_id))
+
+    # Random pool = counter cells not claimed by fixed items
+    available = [c for c in counter_cells if c not in used_pos]
+    if len(random_items) > len(available):
         raise ValueError(
-            f"Not enough counter cells ({len(available)}) "
-            f"for {len(flat_items)} items."
+            f"Not enough free counter cells ({len(available)}) "
+            f"for {len(random_items)} randomly-placed items "
+            f"({len(used_pos)} cells reserved for fixed items)."
         )
 
-    # ── Assign items to counter cells ────────────────────────────────────────
+    # ── Place items ────────────────────────────────────────────────────────────
     if is_gourmet:
-        placed = _assign_gourmet(flat_items, available)
+        placed = _assign_gourmet(fixed, random_items, available)
     else:
-        placed = _assign_standard(flat_items, available)
+        placed = _assign_standard(fixed, random_items, available)
 
-    # ── Agent spawns ─────────────────────────────────────────────────────────
+    # ── Agent spawns ───────────────────────────────────────────────────────────
     if len(agent_spawns) >= num_agents:
         final_agent_idx = agent_spawns[:num_agents]
     else:
@@ -229,7 +379,7 @@ def build(
         extra = num_agents - len(agent_spawns)
         final_agent_idx = agent_spawns + free_floor[:extra]
 
-    # ── Assemble output ──────────────────────────────────────────────────────
+    # ── Assemble output ────────────────────────────────────────────────────────
     if is_gourmet:
         return _make_gourmet_frozendict(H, W, wall_cells, placed, final_agent_idx, recipes)
     else:
@@ -240,7 +390,7 @@ def build(
 # Standard placement
 # ---------------------------------------------------------------------------
 
-def _assign_standard(flat_items, available):
+def _assign_standard(fixed, random_items, available):
     placed = {
         "pot_idx":        [],
         "onion_pile_idx": [],
@@ -253,18 +403,25 @@ def _assign_standard(flat_items, available):
         "plate_pile": "plate_pile_idx",
         "goal":       "goal_idx",
     }
-    for t, _ in flat_items:
-        cell = available.pop(0)
+
+    for t, _, cell in fixed:
         placed[_key[t]].append(cell)
+
+    avail = list(available)
+    for t, _ in random_items:
+        placed[_key[t]].append(avail.pop(0))
+
     return placed
 
 
 def _make_standard_frozendict(H, W, wall_cells, placed, agent_idx, recipes):
-    all_wall = sorted(wall_cells
-                      | set(placed["pot_idx"])
-                      | set(placed["onion_pile_idx"])
-                      | set(placed["plate_pile_idx"])
-                      | set(placed["goal_idx"]))
+    all_wall = sorted(
+        wall_cells
+        | set(placed["pot_idx"])
+        | set(placed["onion_pile_idx"])
+        | set(placed["plate_pile_idx"])
+        | set(placed["goal_idx"])
+    )
     d = {
         "height":         H,
         "width":          W,
@@ -284,15 +441,15 @@ def _make_standard_frozendict(H, W, wall_cells, placed, agent_idx, recipes):
 # Gourmet placement
 # ---------------------------------------------------------------------------
 
-def _assign_gourmet(flat_items, available):
+def _assign_gourmet(fixed, random_items, available):
     placed = {
-        "plate_pile_idx": [],
-        "goal_idx":       [],
-        "dispenser_slots": [],        # list of (flat_idx, ingredient_id_or_None)
-        "tool_slots":     [],         # list of (flat_idx, tool_type_int)
+        "plate_pile_idx":  [],
+        "goal_idx":        [],
+        "dispenser_slots": [],   # list of (flat_idx, ingredient_id_or_None)
+        "tool_slots":      [],   # list of (flat_idx, tool_type_int)
     }
-    for t, ingr_id in flat_items:
-        cell = available.pop(0)
+
+    def _record(t, ingr_id, cell):
         if t == "plate_pile":
             placed["plate_pile_idx"].append(cell)
         elif t == "goal":
@@ -301,6 +458,14 @@ def _assign_gourmet(flat_items, available):
             placed["dispenser_slots"].append((cell, ingr_id))
         elif t in _TOOL_NAME_TO_INT:
             placed["tool_slots"].append((cell, _TOOL_NAME_TO_INT[t]))
+
+    for t, ingr_id, cell in fixed:
+        _record(t, ingr_id, cell)
+
+    avail = list(available)
+    for t, ingr_id in random_items:
+        _record(t, ingr_id, avail.pop(0))
+
     return placed
 
 
@@ -324,7 +489,6 @@ def _make_gourmet_frozendict(H, W, wall_cells, placed, agent_idx, recipes):
         "goal_idx":        np.array(placed["goal_idx"],       dtype=np.int32),
         "plate_pile_idx":  np.array(placed["plate_pile_idx"], dtype=np.int32),
         "dispenser_slots": np.array(disp_indices,             dtype=np.int32),
-        # omit dispenser_ingredient_ids when any slot has no pinned ingredient
         **({
             "dispenser_ingredient_ids": np.array(disp_ingr_ids, dtype=np.int32)
         } if all(i is not None for i in disp_ingr_ids) else {}),
@@ -346,7 +510,7 @@ def load(name_or_path: str, seed: int = 0, num_agents: int = 2) -> FrozenDict:
     Parameters
     ----------
     name_or_path : layout name without .py (e.g. "corridor") or full path
-    seed         : placement seed
+    seed         : placement seed (only affects randomly-placed items)
     num_agents   : number of agents
 
     Returns
@@ -354,7 +518,6 @@ def load(name_or_path: str, seed: int = 0, num_agents: int = 2) -> FrozenDict:
     FrozenDict layout (standard or gourmet, auto-detected from ITEMS)
     """
     import importlib.util
-    import os
 
     if os.path.isfile(name_or_path):
         path = name_or_path
