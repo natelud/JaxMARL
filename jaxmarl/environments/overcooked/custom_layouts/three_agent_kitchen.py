@@ -6,7 +6,7 @@ One agent fetches onions, one cooks, one plates and delivers.
 GRID = """
 WWWWWWWWWWW
 W         W
-A   A   A
+W A  A  A W
 W         W
 WWWWWWWWWWW
 """.strip()
