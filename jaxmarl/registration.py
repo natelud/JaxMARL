@@ -27,6 +27,7 @@ from .environments import (
     Hanabi,
     Overcooked,
     OvercookedV2,
+    GourmetOvercooked,
     CoinGame,
     JaxNav,
     SUBMODULE_ENVIRONMENTS
@@ -121,6 +122,8 @@ def make(env_id: str, **env_kwargs):
         env = Overcooked(**env_kwargs)
     elif env_id == "overcooked_v2":
         env = OvercookedV2(**env_kwargs)
+    elif env_id == "overcooked_gourmet":
+        env = GourmetOvercooked(**env_kwargs)
 
     # 8. Coin Game
     elif env_id == "coin_game":
@@ -180,6 +183,7 @@ registered_envs = [
     "hanabi",
     "overcooked",
     "overcooked_v2",
+    "overcooked_gourmet",
     "coin_game",
     "jaxnav",
     "JaxRobotarium_navigation",

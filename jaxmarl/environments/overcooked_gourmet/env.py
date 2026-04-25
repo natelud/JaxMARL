@@ -1,6 +1,6 @@
 """
-overcooked_gourmet.py — GourmetOvercooked JAX Environment
-==========================================================
+env.py — GourmetOvercooked JAX Environment
+==========================================
 A generalised, recipe-driven extension of Overcooked supporting:
 
   • 301 MealDB recipes (538 ingredients, 7 tool types)
@@ -8,21 +8,14 @@ A generalised, recipe-driven extension of Overcooked supporting:
   • Multi-component plate assembly (collect outputs from multiple tools)
   • Selectable target recipe(s) via `recipe_ids` argument
 
-Observation (flat per-agent vector, length H*W*N_GRID_CH + N_FLAT):
-  Grid channels: agent positions/dirs, walls, goals, plate pile, dispensers,
-                 per-tool-type presence, tool timer, tool done, plates, urgency.
-  Flat channels: per-component progress, time, inventory info.
-
 Usage
 -----
-    env = GourmetOvercooked(recipe_ids=[5, 42])   # or "all" for every recipe
-    obs, state = env.reset(jax.random.PRNGKey(0))
-    obs, state, rewards, dones, info = env.step(key, state, actions)
+    from jaxmarl import make
+    env = make("overcooked_gourmet", recipe_ids=[5, 42])
 
-Recipe selection
-----------------
-`recipe_ids` may be a list of ints, a single int, or "all".
-One recipe is sampled uniformly at the start of each episode.
+    # or directly:
+    from jaxmarl.environments.overcooked_gourmet import GourmetOvercooked
+    env = GourmetOvercooked(recipe_ids=[5, 42])
 """
 
 import os
@@ -39,7 +32,7 @@ from flax import struct
 
 from jaxmarl.environments import MultiAgentEnv, spaces
 
-from .common_gourmet import (
+from .common import (
     # grid dimensions
     FIXED_H, FIXED_W,
     # object type constants
@@ -73,7 +66,7 @@ class Actions(IntEnum):
     right    = 2
     left     = 3
     stay     = 4
-    interact = 5   # single "do-everything" interact (used when expanded_actions=False)
+    interact = 5
     # Fine-grained actions (used when expanded_actions=True)
     pickup_putdown    = 6
     use_cutting_board = 7
@@ -110,7 +103,7 @@ def _find_db(explicit: Optional[str] = None) -> str:
 
 class GourmetOvercooked(MultiAgentEnv):
     """
-    Recipe-driven generalisation of Overcooked.
+    Recipe-driven generalisation of Overcooked for JaxMARL.
 
     Parameters
     ----------
@@ -120,13 +113,10 @@ class GourmetOvercooked(MultiAgentEnv):
     max_steps  : int   (default 500)
     random_reset : bool  (default False)
     instantaneous_cook : bool  (default False)
-        If True, cooking completes as soon as all ingredients are added.
     expanded_actions : bool  (default False)
-        If True, use separate actions per tool type (mirroring Overcooked).
-    recipe_db_path : str | None  (override path to gourmet_recipe_db.json)
+    recipe_db_path : str | None
     """
 
-    # Tool actions available in the expanded set (values from Actions enum)
     EXPANDED_TOOL_ACTIONS = [
         Actions.pickup_putdown,
         Actions.use_cutting_board,
@@ -150,7 +140,6 @@ class GourmetOvercooked(MultiAgentEnv):
     ):
         super().__init__(num_agents=num_agents)
 
-        # ── Load recipe DB ───────────────────────────────────────────────────
         db_path = _find_db(recipe_db_path)
         with open(db_path) as f:
             db = json.load(f)
@@ -160,7 +149,6 @@ class GourmetOvercooked(MultiAgentEnv):
         self.N_INGR         = self._db_constants["N_INGREDIENTS"]
         self.INV_PLATE      = self.N_INGR + 1
 
-        # Allowed recipe IDs
         if recipe_ids == "all":
             self._allowed = list(range(len(self._all_recipes)))
         elif isinstance(recipe_ids, int):
@@ -170,17 +158,14 @@ class GourmetOvercooked(MultiAgentEnv):
         if not self._allowed:
             raise ValueError("No valid recipe IDs provided.")
 
-        # ── Pre-compile recipe arrays (numpy, used only in reset) ─────────────
         self._compile_recipe_arrays()
 
-        # ── Fixed env settings ────────────────────────────────────────────────
-        self.max_steps         = max_steps
-        self.random_reset      = random_reset
+        self.max_steps          = max_steps
+        self.random_reset       = random_reset
         self.instantaneous_cook = instantaneous_cook
-        self.expanded_actions  = expanded_actions
-        self.agent_view_size   = 5
+        self.expanded_actions   = expanded_actions
+        self.agent_view_size    = 5
 
-        # Static constant for normalising timers in observations
         self._max_cook_time = float(max(TOOL_COOK_TIMES.tolist()))
 
         self.agents = [f"agent_{i}" for i in range(num_agents)]
@@ -190,7 +175,6 @@ class GourmetOvercooked(MultiAgentEnv):
         else:
             self.action_set = jnp.array(base_actions + [Actions.interact])
 
-        # Layout is always FIXED_H × FIXED_W
         self._H = FIXED_H
         self._W = FIXED_W
 
@@ -198,7 +182,6 @@ class GourmetOvercooked(MultiAgentEnv):
         n_flat      = MAX_COMP * 3 + 3
         self._n_grid_ch = n_grid_ch
         self._n_flat    = n_flat
-        # Flat channels are broadcast to (n_flat, H, W) and concat'd with grid
         flat_len        = FIXED_H * FIXED_W * (n_grid_ch + n_flat)
         self.obs_shape  = (flat_len,)
 
@@ -210,8 +193,6 @@ class GourmetOvercooked(MultiAgentEnv):
             for a in self.agents
         }
 
-        # Pre-compute one concrete reset state per allowed recipe so that
-        # reset() is vmap-compatible (no Python int() on traced values).
         self._cached_resets: list = []
         dummy_key = jax.random.PRNGKey(0)
         for rid in self._allowed:
@@ -247,7 +228,6 @@ class GourmetOvercooked(MultiAgentEnv):
                 for ii, ingr in enumerate(ingrs):
                     self._rec_comp_ingr[ri, ci, ii] = ingr["ingredient_id"]
 
-        # Also store unique ingredient lists per recipe for dispenser setup
         self._rec_unique_ingrs = []
         for recipe in self._all_recipes:
             seen, ids = set(), []
@@ -263,13 +243,6 @@ class GourmetOvercooked(MultiAgentEnv):
     # ────────────────────────────────────────────────────────────────────────
 
     def _n_grid_channels(self) -> int:
-        # num_agents (agent positions) + 4*num_agents (direction channels)
-        # + 1 (wall) + 1 (goal) + 1 (plate pile)
-        # + 3 (disp binary, disp ingr norm, disp needed)
-        # + N_TOOL_TYPES (one binary per tool type)
-        # + 2 (timer norm, done flag)
-        # + 2 (plate on ctr, plate completeness)
-        # + 1 (urgency)
         return 5 * self.num_agents + 1 + 1 + 1 + 3 + N_TOOL_TYPES + 2 + 2 + 1
 
     # ────────────────────────────────────────────────────────────────────────
@@ -277,12 +250,8 @@ class GourmetOvercooked(MultiAgentEnv):
     # ────────────────────────────────────────────────────────────────────────
 
     def reset(self, key: chex.PRNGKey) -> Tuple[Dict, GourmetState]:
-        # Return a pre-cached concrete reset state so that reset() is fully
-        # vmap-compatible (no Python int() on traced JAX values).
-        # With a single allowed recipe the cache always has exactly one entry.
         if len(self._cached_resets) == 1:
             return self._cached_resets[0]
-        # Multiple recipes: pick uniformly (key only used for selection index).
         key, rk = jax.random.split(key)
         pick = int(jax.random.randint(rk, (), 0, len(self._cached_resets)))
         return self._cached_resets[pick]
@@ -294,43 +263,26 @@ class GourmetOvercooked(MultiAgentEnv):
         n_comps  = self._rec_n_comps[recipe_idx]
         comps    = recipe["components"][:MAX_COMP]
 
-        # ── Build fixed-size kitchen grid ────────────────────────────────
-        # Layout:
-        #   row 0: all walls
-        #   row 1: top counter  (dispensers, plate pile, delivery goal)
-        #   row 2: floor
-        #   row 3: floor (agent spawns)
-        #   row 4: bottom counter (tools)
-        #   row 5: all walls
-
-        # Start with all walls
-        grid = np.ones((H, W), dtype=np.int32)   # 1 = wall, 0 = floor
-        # Interior floor
+        grid = np.ones((H, W), dtype=np.int32)
         grid[2:4, 1:W-1] = 0
 
-        # ── Top counter placements ────────────────────────────────────────
         n_disp  = min(len(unique_ingrs), MAX_DISP, W - 3)
         disp_xs = list(range(1, 1 + n_disp))
         pp_x    = min(1 + n_disp, W - 3)
         goal_x  = min(pp_x + 1, W - 2)
         top_y   = 1
 
-        # ── Bottom counter placements ─────────────────────────────────────
         n_tools = min(n_comps, MAX_TOOLS, W - 2)
         tool_xs = list(range(1, 1 + n_tools))
         bot_y   = 4
 
-        # ── Positions arrays ─────────────────────────────────────────────
         wall_map = grid.astype(bool)
 
-        # Goals
         goal_pos = np.zeros((MAX_GOALS, 2), dtype=np.int32)
         goal_pos[0] = [goal_x, top_y]
 
-        # Plate pile
         plate_pile_pos = np.array([pp_x, top_y], dtype=np.int32)
 
-        # Dispensers
         disp_pos       = np.zeros((MAX_DISP, 2), dtype=np.int32)
         disp_ingr      = np.full((MAX_DISP,), -1, dtype=np.int32)
         disp_active    = np.zeros((MAX_DISP,), dtype=bool)
@@ -339,7 +291,6 @@ class GourmetOvercooked(MultiAgentEnv):
             disp_ingr[i]   = ingr_id
             disp_active[i] = True
 
-        # Tools
         tool_pos       = np.zeros((MAX_TOOLS, 2), dtype=np.int32)
         tool_type_arr  = np.full((MAX_TOOLS,), -1, dtype=np.int32)
         tool_comp_idx  = np.full((MAX_TOOLS,), -1, dtype=np.int32)
@@ -352,7 +303,6 @@ class GourmetOvercooked(MultiAgentEnv):
             tool_active[i]   = True
             tool_needed_n[i] = comp["n_ingredients"]
 
-        # Agent spawn positions
         key, rk = jax.random.split(key)
         free = [(x, y) for y in [2, 3] for x in range(1, W - 1)]
 
@@ -361,7 +311,6 @@ class GourmetOvercooked(MultiAgentEnv):
             agent_pos = np.array([[free[int(i)][0], free[int(i)][1]]
                                    for i in idxs], dtype=np.int32)
         else:
-            # Evenly space N agents across the available floor cells (rows 2-3)
             n = self.num_agents
             if n == 1:
                 chosen = [free[len(free) // 2]]
@@ -370,21 +319,17 @@ class GourmetOvercooked(MultiAgentEnv):
                 chosen = [free[int(round(i * step))] for i in range(n)]
             agent_pos = np.array([[p[0], p[1]] for p in chosen], dtype=np.int32)
 
-        # Deterministic initial facing direction so that _reset_for_recipe stays
-        # vmap-compatible (no JAX random calls that produce concrete values).
         agent_dir_idx = np.zeros(self.num_agents, dtype=np.int32)
         agent_dir     = np.array(DIR_TO_VEC)[agent_dir_idx]
 
-        # ── Recipe data for state ────────────────────────────────────────
         ri = recipe_idx
         r_n_comps    = int(self._rec_n_comps[ri])
-        r_comp_tool  = self._rec_comp_tool[ri].copy()    # (MAX_COMP,)
+        r_comp_tool  = self._rec_comp_tool[ri].copy()
         r_comp_cook  = self._rec_comp_cook[ri].copy()
         r_comp_n_ingr= self._rec_comp_n_ingr[ri].copy()
-        r_comp_ingr  = self._rec_comp_ingr[ri].copy()    # (MAX_COMP, MAX_INGR_PER_COMP)
+        r_comp_ingr  = self._rec_comp_ingr[ri].copy()
         r_comp_ids   = self._rec_comp_ids[ri].copy()
 
-        # ── Plates ───────────────────────────────────────────────────────
         plate_pos      = np.zeros((MAX_PLATES, 2), dtype=np.int32)
         plate_on_ctr   = np.zeros((MAX_PLATES,), dtype=bool)
         plate_exists   = np.zeros((MAX_PLATES,), dtype=bool)
@@ -392,7 +337,6 @@ class GourmetOvercooked(MultiAgentEnv):
         plate_n_cont   = np.zeros((MAX_PLATES,), dtype=np.int32)
         plate_complete = np.zeros((MAX_PLATES,), dtype=bool)
 
-        # ── Maze map ─────────────────────────────────────────────────────
         maze_map = self._build_maze_map(
             H, W, wall_map, agent_pos, agent_dir_idx,
             goal_pos[:1],
@@ -449,7 +393,7 @@ class GourmetOvercooked(MultiAgentEnv):
         return lax.stop_gradient(obs), lax.stop_gradient(state)
 
     # ────────────────────────────────────────────────────────────────────────
-    # Maze-map builder (numpy, called once per reset)
+    # Maze-map builder
     # ────────────────────────────────────────────────────────────────────────
 
     def _build_maze_map(
@@ -477,7 +421,7 @@ class GourmetOvercooked(MultiAgentEnv):
 
         _set(int(plate_pile_pos[1]), int(plate_pile_pos[0]), OBJ_PLATE_PILE, 6, 0)
 
-        tool_colors = [2, 7, 5, 4, 8, 6, 0]  # per tool type: blue,white,grey,orange,cyan,white,black
+        tool_colors = [2, 7, 5, 4, 8, 6, 0]
         for i in range(MAX_TOOLS):
             if not tool_active[i]:
                 continue
@@ -535,7 +479,6 @@ class GourmetOvercooked(MultiAgentEnv):
         n = self.num_agents
         H, W = FIXED_H, FIXED_W
 
-        # ── Movement ─────────────────────────────────────────────────────
         is_move  = jnp.logical_and(action != Actions.stay, action != Actions.interact)
         is_move_T = jnp.expand_dims(is_move, 0).T
 
@@ -563,7 +506,6 @@ class GourmetOvercooked(MultiAgentEnv):
         bounced = blocked | ~is_move_T
         fwd_pos = (bounced * state.agent_pos + (~bounced) * fwd_pos).astype(jnp.int32)
 
-        # N-agent collision & swap prevention — first pass
         new_pos = fwd_pos
         for _i in range(self.num_agents):
             for _j in range(_i + 1, self.num_agents):
@@ -575,7 +517,6 @@ class GourmetOvercooked(MultiAgentEnv):
                 blocked_ij = collision_ij | swap_ij
                 new_pos = new_pos.at[_i].set(jnp.where(blocked_ij, state.agent_pos[_i], new_pos[_i]))
                 new_pos = new_pos.at[_j].set(jnp.where(blocked_ij, state.agent_pos[_j], new_pos[_j]))
-        # Second pass: catch cascading overlaps (N > 2 case)
         for _i in range(self.num_agents):
             for _j in range(_i + 1, self.num_agents):
                 still_overlap = jnp.all(new_pos[_i] == new_pos[_j])
@@ -590,8 +531,7 @@ class GourmetOvercooked(MultiAgentEnv):
                                    agent_dir=agent_dir,
                                    agent_dir_idx=agent_dir_idx)
 
-        # ── Interactions ─────────────────────────────────────────────────
-        fwd_facing = state.agent_pos + state.agent_dir   # facing pos before moving
+        fwd_facing = state.agent_pos + state.agent_dir
         if self.expanded_actions:
             is_interact = action >= int(Actions.pickup_putdown)
         else:
@@ -614,7 +554,6 @@ class GourmetOvercooked(MultiAgentEnv):
             total_reward += jax.lax.select(is_interact[ai], ai_rew, 0.0)
             shaped_rewards.append(jax.lax.select(is_interact[ai], ai_sh, 0.0))
 
-        # ── Update agent cells in maze_map ────────────────────────────────
         PAD      = self.agent_view_size - 1
         mm       = state_mid.maze_map
         empty_v  = jnp.array([OBJ_EMPTY, 0, 0], dtype=jnp.uint8)
@@ -627,8 +566,6 @@ class GourmetOvercooked(MultiAgentEnv):
             mm = mm.at[PAD + agent_pos[ai, 1], PAD + agent_pos[ai, 0], :].set(cell)
 
         state_mid = state_mid.replace(maze_map=mm)
-
-        # ── Tick tool cooking timers ──────────────────────────────────────
         state_mid = self._tick_tools(state_mid)
 
         return state_mid, total_reward, jnp.array(shaped_rewards)
@@ -643,7 +580,6 @@ class GourmetOvercooked(MultiAgentEnv):
         just_done  = is_cooking & (new_timer == 0)
         new_done   = state.tool_done | just_done
 
-        # Reflect done status in maze_map meta byte (low 4 = tool_idx, bit 4 = done)
         PAD = self.agent_view_size - 1
         mm  = state.maze_map
 
@@ -700,22 +636,17 @@ class GourmetOvercooked(MultiAgentEnv):
         holding_nothing = (inv == INV_EMPTY)
         holding_raw     = (inv > INV_EMPTY) & (inv <= self.N_INGR)
         holding_plate   = (inv == self.INV_PLATE)
-        raw_ingr_id     = inv - 1   # valid only when holding_raw
+        raw_ingr_id     = inv - 1
 
-        # Tool index encoded in meta low nibble
         tool_idx = obj_meta & 0x0F
 
         reward  = 0.0
         shaped  = 0.0
 
-        # ── Gate interactions for expanded_actions ───────────────────────
-        # When expanded_actions=True, use_<tool> actions fire only on the
-        # matching tool type; pickup_putdown gates all non-tool interactions.
         if self.expanded_actions and interact_type is not None:
             act = interact_type.astype(jnp.int32)
             is_pickup_action = (act == int(Actions.pickup_putdown))
             is_tool_action   = act >= int(Actions.use_cutting_board)
-            # use_cutting_board(7) → tool_type 0, use_pot(8) → 1, ..., use_grill(13) → 6
             expected_tool_type = jnp.where(
                 is_tool_action,
                 act - int(Actions.use_cutting_board),
@@ -738,54 +669,46 @@ class GourmetOvercooked(MultiAgentEnv):
             is_goal_eff         = is_goal
             is_table_eff        = is_table
 
-        # ── 1. Add raw ingredient to tool ─────────────────────────────────
         state, r1, s1 = self._case_add_to_tool(
             state, fwd_pos, agent_idx,
             is_any_tool_eff, holding_raw, raw_ingr_id, tool_idx,
         )
         reward += r1; shaped += s1
 
-        # ── 2. Collect finished component onto plate ──────────────────────
         state, r2, s2 = self._case_collect_component(
             state, fwd_pos, agent_idx,
             is_any_tool_eff, holding_plate, plate_idx, tool_idx,
         )
         reward += r2; shaped += s2
 
-        # ── 3. Deliver complete plate ─────────────────────────────────────
         state, r3, s3 = self._case_deliver(
             state, agent_idx,
             is_goal_eff, holding_plate, plate_idx,
         )
         reward += r3; shaped += s3
 
-        # ── 4. Pick up fresh plate from plate pile ────────────────────────
         state, r4, s4 = self._case_pickup_plate_pile(
             state, agent_idx, is_plate_pile_eff, holding_nothing,
         )
         reward += r4; shaped += s4
 
-        # ── 5. Pick up raw ingredient from dispenser ──────────────────────
         state, r5, s5 = self._case_pickup_dispenser(
             state, agent_idx, is_dispenser_eff, holding_nothing, obj_meta,
         )
         reward += r5; shaped += s5
 
-        # ── 6. Drop item on empty counter ─────────────────────────────────
         state, r6, s6 = self._case_drop(
             state, fwd_pos, agent_idx,
             is_table_eff, is_empty_counter, inv, plate_idx, holding_raw, holding_plate,
         )
         reward += r6; shaped += s6
 
-        # ── 7. Pick up plate from counter ─────────────────────────────────
         state, r7, s7 = self._case_pickup_plate_counter(
             state, fwd_pos, agent_idx,
             is_plate_on_ctr_eff, holding_nothing, obj_meta,
         )
         reward += r7; shaped += s7
 
-        # ── 8. Pick up raw ingredient from counter ────────────────────────
         state, r8, s8 = self._case_pickup_raw_counter(
             state, fwd_pos, agent_idx,
             is_raw_on_ctr_eff, holding_nothing, obj_meta,
@@ -802,7 +725,6 @@ class GourmetOvercooked(MultiAgentEnv):
         self, state, fwd_pos, agent_idx,
         is_any_tool, holding_raw, raw_ingr_id, tool_idx,
     ):
-        """Place a raw ingredient into the appropriate cooking tool."""
         can = is_any_tool & holding_raw
 
         def _do(st):
@@ -811,10 +733,9 @@ class GourmetOvercooked(MultiAgentEnv):
             idle     = (st.tool_timer[ti] == -1)
             has_room = st.tool_n_contents[ti] < st.tool_needed_n[ti]
 
-            # Check ingredient is required by this component
             comp_i       = st.tool_comp_idx[ti]
             n_ingr_valid = st.recipe_comp_n_ingr[comp_i]
-            ingr_list    = st.recipe_comp_ingr[comp_i]   # (MAX_INGR_PER_COMP,)
+            ingr_list    = st.recipe_comp_ingr[comp_i]
             ingr_needed  = jnp.any(
                 (jnp.arange(MAX_INGR_PER_COMP) < n_ingr_valid) & (ingr_list == raw_ingr_id)
             )
@@ -823,7 +744,6 @@ class GourmetOvercooked(MultiAgentEnv):
 
             new_n = jnp.where(valid, st.tool_n_contents.at[ti].set(st.tool_n_contents[ti] + 1),
                               st.tool_n_contents)
-            # Start cooking if full; instantaneous_cook skips countdown
             cook_t    = st.recipe_comp_cook[comp_i]
             just_full = valid & (new_n[ti] >= st.tool_needed_n[ti])
             if self.instantaneous_cook:
@@ -847,7 +767,6 @@ class GourmetOvercooked(MultiAgentEnv):
         self, state, fwd_pos, agent_idx,
         is_any_tool, holding_plate, plate_idx, tool_idx,
     ):
-        """Collect a finished tool output onto the held plate."""
         can = is_any_tool & holding_plate
 
         def _do(st):
@@ -860,21 +779,18 @@ class GourmetOvercooked(MultiAgentEnv):
             comp_i   = st.tool_comp_idx[ti]
             comp_id  = st.recipe_comp_ids[comp_i]
 
-            # Add component to plate
             slot     = jnp.minimum(st.plate_n_contents[pi], MAX_COMP - 1)
             new_pcon = jnp.where(valid, st.plate_contents.at[pi, slot].set(comp_id),
                                   st.plate_contents)
             new_pn   = jnp.where(valid, st.plate_n_contents.at[pi].set(st.plate_n_contents[pi] + 1),
                                   st.plate_n_contents)
 
-            # Check plate completeness
             new_complete_flag = _check_plate_complete(
                 new_pcon[pi], st.recipe_comp_ids, st.recipe_n_comps
             )
             new_pcomp = jnp.where(valid, st.plate_complete.at[pi].set(new_complete_flag),
                                    st.plate_complete)
 
-            # Reset tool
             new_tn    = jnp.where(valid, st.tool_n_contents.at[ti].set(0), st.tool_n_contents)
             new_timer = jnp.where(valid, st.tool_timer.at[ti].set(-1), st.tool_timer)
             new_tdone = jnp.where(valid, st.tool_done.at[ti].set(False), st.tool_done)
@@ -890,7 +806,6 @@ class GourmetOvercooked(MultiAgentEnv):
         return state, r, s
 
     def _case_deliver(self, state, agent_idx, is_goal, holding_plate, plate_idx):
-        """Deliver a complete plate to the goal."""
         can = is_goal & holding_plate
 
         def _do(st):
@@ -918,11 +833,9 @@ class GourmetOvercooked(MultiAgentEnv):
         return state, r, s
 
     def _case_pickup_plate_pile(self, state, agent_idx, is_plate_pile, holding_nothing):
-        """Pick up a fresh empty plate from the pile."""
         can = is_plate_pile & holding_nothing
 
         def _do(st):
-            # First slot where plate_exists is False
             free_slot = jnp.argmin(st.plate_exists.astype(jnp.int32) +
                                     jnp.arange(MAX_PLATES) * 1000)
             pi    = jnp.where(jnp.any(~st.plate_exists), free_slot, -1)
@@ -946,7 +859,6 @@ class GourmetOvercooked(MultiAgentEnv):
         return state, r, s
 
     def _case_pickup_dispenser(self, state, agent_idx, is_dispenser, holding_nothing, ingr_meta):
-        """Pick up a raw ingredient from its dispenser."""
         can = is_dispenser & holding_nothing
 
         def _do(st):
@@ -962,7 +874,6 @@ class GourmetOvercooked(MultiAgentEnv):
         self, state, fwd_pos, agent_idx,
         is_table, is_empty_counter, inv, plate_idx, holding_raw, holding_plate,
     ):
-        """Drop the held item onto an empty counter cell."""
         PAD = self.agent_view_size - 1
         fwd_x, fwd_y = fwd_pos[0], fwd_pos[1]
 
@@ -1003,7 +914,6 @@ class GourmetOvercooked(MultiAgentEnv):
     def _case_pickup_plate_counter(
         self, state, fwd_pos, agent_idx, is_plate_on_ctr, holding_nothing, obj_meta,
     ):
-        """Pick up a plate that's resting on a counter cell."""
         PAD = self.agent_view_size - 1
         fwd_x, fwd_y = fwd_pos[0], fwd_pos[1]
         can = is_plate_on_ctr & holding_nothing
@@ -1032,7 +942,6 @@ class GourmetOvercooked(MultiAgentEnv):
     def _case_pickup_raw_counter(
         self, state, fwd_pos, agent_idx, is_raw_on_ctr, holding_nothing, ingr_meta,
     ):
-        """Pick up a raw ingredient dropped on a counter cell."""
         PAD = self.agent_view_size - 1
         fwd_x, fwd_y = fwd_pos[0], fwd_pos[1]
         can = is_raw_on_ctr & holding_nothing
@@ -1053,34 +962,12 @@ class GourmetOvercooked(MultiAgentEnv):
     # ────────────────────────────────────────────────────────────────────────
 
     def get_obs(self, state: GourmetState) -> Dict[str, chex.Array]:
-        """
-        Grid channels (H × W × 28):
-          0-1   : agent positions (self, other)
-          2-9   : orientations (self×4, other×4)
-          10    : walls
-          11    : delivery goals
-          12    : plate pile
-          13    : any dispenser
-          14    : normalised ingredient_id at dispenser
-          15    : dispenser ingredient is needed by recipe
-          16-22 : one binary per tool type (cutting_board..grill)
-          23    : normalised tool timer at tool cell
-          24    : tool output ready
-          25    : plate on counter
-          26    : plate completeness fraction
-          27    : urgency
-
-        Flat channels (MAX_COMP*3 + 3):
-          for c in 0..MAX_COMP-1: [comp_done, timer_frac, fill_frac]
-          then: [time_frac, inv_frac, held_plate_completeness]
-        """
         PAD  = self.agent_view_size - 1
         H, W = FIXED_H, FIXED_W
         mm   = state.maze_map[PAD:PAD + H, PAD:PAD + W, :]
         obj  = mm[:, :, 0].astype(jnp.int32)
         meta = mm[:, :, 2].astype(jnp.int32)
 
-        # ── Spatial layers ────────────────────────────────────────────────
         wall_l  = (obj == OBJ_WALL).astype(jnp.float32)
         goal_l  = (obj == OBJ_GOAL).astype(jnp.float32)
         pp_l    = (obj == OBJ_PLATE_PILE).astype(jnp.float32)
@@ -1090,8 +977,7 @@ class GourmetOvercooked(MultiAgentEnv):
                                   meta.astype(jnp.float32) / jnp.maximum(self.N_INGR, 1),
                                   0.0)
 
-        # Is this dispenser's ingredient needed by the recipe?
-        recipe_all_ingrs = state.recipe_comp_ingr.ravel()   # (MAX_COMP*MAX_INGR_PER_COMP,)
+        recipe_all_ingrs = state.recipe_comp_ingr.ravel()
         disp_needed_l = jnp.where(
             disp_l.astype(bool),
             jax.vmap(jax.vmap(
@@ -1100,13 +986,11 @@ class GourmetOvercooked(MultiAgentEnv):
             0.0,
         )
 
-        # Per-tool-type binary layers
         tool_layers = [
             (obj == (OBJ_CUTTING_BOARD + t)).astype(jnp.float32)
             for t in range(N_TOOL_TYPES)
         ]
 
-        # Tool timer and done at tool cells
         max_cook   = self._max_cook_time
         is_any_tool = jnp.any(jnp.stack(
             [obj == (OBJ_CUTTING_BOARD + t) for t in range(N_TOOL_TYPES)]
@@ -1123,7 +1007,6 @@ class GourmetOvercooked(MultiAgentEnv):
         timer_l = jnp.where(is_any_tool, timer_l, 0.0)
         done_l  = jnp.where(is_any_tool, done_l,  0.0)
 
-        # Plate on counter
         plate_ctr_l   = (obj == OBJ_PLATE_ON_CTR).astype(jnp.float32)
         n_req_f       = jnp.maximum(state.recipe_n_comps, 1).astype(jnp.float32)
 
@@ -1145,7 +1028,6 @@ class GourmetOvercooked(MultiAgentEnv):
             + [timer_l, done_l, plate_ctr_l, plate_comp_l, urgency_l]
         )
 
-        # ── Flat recipe-progress channels ─────────────────────────────────
         flat_parts = []
         for c in range(MAX_COMP):
             c_valid = c < state.recipe_n_comps
@@ -1164,7 +1046,6 @@ class GourmetOvercooked(MultiAgentEnv):
             )
             flat_parts.extend([comp_done, timer_frac, fill_frac])
 
-        # ── Build per-agent observation (N-agent) ───────────────────────
         n_a = self.num_agents
 
         agent_pos_l = jnp.zeros((n_a, H, W), dtype=jnp.float32)
@@ -1173,7 +1054,6 @@ class GourmetOvercooked(MultiAgentEnv):
                 _ai, state.agent_pos[_ai, 1], state.agent_pos[_ai, 0]
             ].set(1.0)
 
-        # Each agent occupies 4 consecutive direction slots
         dir_l = jnp.zeros((4 * n_a, H, W), dtype=jnp.float32)
         dir_offsets   = jnp.arange(n_a) * 4
         dir_layer_idx = state.agent_dir_idx + dir_offsets
@@ -1183,7 +1063,6 @@ class GourmetOvercooked(MultiAgentEnv):
         for self_i in range(n_a):
             others = [j for j in range(n_a) if j != self_i]
 
-            # Per-agent flat suffix
             pi       = state.agent_plate_idx[self_i]
             inv_code = state.agent_inv[self_i]
             inv_frac = jnp.where(inv_code == INV_EMPTY, 0.0,
@@ -1197,9 +1076,7 @@ class GourmetOvercooked(MultiAgentEnv):
             time_frac = jnp.maximum(self.max_steps - state.time, 0) / float(self.max_steps)
             flat_ai = jnp.array(flat_parts + [time_frac, inv_frac, held_c])
 
-            # Positional channels: self first, then others
             pos_ch = [agent_pos_l[self_i]] + [agent_pos_l[j] for j in others]
-            # Direction channels: self 4 first, then 4 per other
             dir_ch = [dir_l[self_i * 4 + d] for d in range(4)]
             for j in others:
                 dir_ch += [dir_l[j * 4 + d] for d in range(4)]
@@ -1246,9 +1123,9 @@ class GourmetOvercooked(MultiAgentEnv):
 # ---------------------------------------------------------------------------
 
 def _check_plate_complete(
-    plate_row: chex.Array,    # (MAX_COMP,)  component IDs on plate (-1 = empty)
-    req_ids:   chex.Array,    # (MAX_COMP,)  required component IDs (-1 = padding)
-    n_req:     chex.Array,    # scalar int   actual number of required components
+    plate_row: chex.Array,
+    req_ids:   chex.Array,
+    n_req:     chex.Array,
 ) -> chex.Array:
     """True iff every required component ID appears in plate_row."""
     valid  = jnp.arange(MAX_COMP) < n_req
