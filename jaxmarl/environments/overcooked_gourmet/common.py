@@ -27,46 +27,141 @@ OBJ_GOAL            = 2
 OBJ_PLATE_PILE      = 3
 OBJ_AGENT           = 4
 OBJ_DISPENSER       = 5   # ingredient dispenser; maze_map[:,:,2] = ingredient_id (mod 256)
-OBJ_CUTTING_BOARD   = 6   # maze_map[:,:,2] encodes tool_idx | (done_flag << 4)
-OBJ_POT             = 7
-OBJ_PAN             = 8
-OBJ_OVEN            = 9
-OBJ_BLENDER         = 10
-OBJ_MIXING_BOWL     = 11
-OBJ_GRILL           = 12
-OBJ_PLATE_ON_CTR    = 13  # plate on counter; maze_map[:,:,2] = plate_idx
-OBJ_RAW_ON_CTR      = 14  # loose raw ingredient; maze_map[:,:,2] = ingredient_id (mod 256)
+OBJ_CUTTING_BOARD   = 6   # first tool OBJ type; tool t → OBJ_CUTTING_BOARD + t
+# Tool OBJ types occupy 6..56 (one per tool, sequential from OBJ_CUTTING_BOARD)
+OBJ_PLATE_ON_CTR    = 57  # plate on counter; maze_map[:,:,2] = plate_idx
+OBJ_RAW_ON_CTR      = 58  # loose raw ingredient; maze_map[:,:,2] = ingredient_id (mod 256)
 
-N_OBJ_TYPES = 15
+N_OBJ_TYPES = 59
 
-# Tool-type index → object-type index (index 0..6 → obj 6..12)
-TOOL_TYPE_TO_OBJ = jnp.array([
-    OBJ_CUTTING_BOARD,   # TOOL_CUTTING_BOARD = 0
-    OBJ_POT,             # TOOL_POT           = 1
-    OBJ_PAN,             # TOOL_PAN           = 2
-    OBJ_OVEN,            # TOOL_OVEN          = 3
-    OBJ_BLENDER,         # TOOL_BLENDER       = 4
-    OBJ_MIXING_BOWL,     # TOOL_MIXING_BOWL   = 5
-    OBJ_GRILL,           # TOOL_GRILL         = 6
+# Tool-type index → object-type index (tool t → OBJ_CUTTING_BOARD + t)
+TOOL_TYPE_TO_OBJ = jnp.arange(OBJ_CUTTING_BOARD, OBJ_CUTTING_BOARD + 51, dtype=jnp.int32)
+
+
+# ---------------------------------------------------------------------------
+# Tool type constants  (one per canonical affordance, index 0..50)
+# ---------------------------------------------------------------------------
+
+TOOL_FORMABLE       =  0
+TOOL_CRACKABLE      =  1
+TOOL_POUNDABLE      =  2
+TOOL_MASHABLE       =  3
+TOOL_COOKABLE       =  4
+TOOL_STORABLE       =  5
+TOOL_STEWABLE       =  6
+TOOL_STIRRABLE      =  7
+TOOL_SWEETENABLE    =  8
+TOOL_TOASTABLE      =  9
+TOOL_TEARABLE       = 10
+TOOL_CUTTABLE       = 11
+TOOL_PEELABLE       = 12
+TOOL_COATABLE       = 13
+TOOL_SPREADABLE     = 14
+TOOL_TOPABLE        = 15
+TOOL_DISSOLVABLE    = 16
+TOOL_SHREDDABLE     = 17
+TOOL_STEAMABLE      = 18
+TOOL_MEASUREABLE    = 19
+TOOL_KNEADABLE      = 20
+TOOL_MELTABLE       = 21
+TOOL_CLEANABLE      = 22
+TOOL_BLENDABLE      = 23
+TOOL_FREEZEABLE     = 24
+TOOL_CHILLABLE      = 25
+TOOL_COOLABLE       = 26
+TOOL_THICKENABLE    = 27
+TOOL_DRYABLE        = 28
+TOOL_DRAINABLE      = 29
+TOOL_EVAPORATABLE   = 30
+TOOL_SOAKABLE       = 31
+TOOL_SQUEEZABLE     = 32
+TOOL_BAKEABLE       = 33
+TOOL_MARINATEABLE   = 34
+TOOL_SOFTENABLE     = 35
+TOOL_SCOOPABLE      = 36
+TOOL_SEASONABLE     = 37
+TOOL_POURABLE       = 38
+TOOL_REHYDRATEABLE  = 39
+TOOL_SMOKEABLE      = 40
+TOOL_BREADABLE      = 41
+TOOL_SKEWERABLE     = 42
+TOOL_MICROWAVEABLE  = 43
+TOOL_RINSABLE       = 44
+TOOL_STRAINABLE     = 45
+TOOL_SIFTABLE       = 46
+TOOL_FERMENTABLE    = 47
+TOOL_BOILABLE       = 48
+TOOL_STUFFABLE      = 49
+TOOL_STACKABLE      = 50
+N_TOOL_TYPES        = 51
+
+TOOL_COOK_TIMES = jnp.array([
+    10,  #  0 formable
+     3,  #  1 crackable
+     8,  #  2 poundable
+     5,  #  3 mashable
+    15,  #  4 cookable
+     5,  #  5 storable
+    25,  #  6 stewable
+     5,  #  7 stirrable
+    10,  #  8 sweetenable
+     8,  #  9 toastable
+     3,  # 10 tearable
+     5,  # 11 cuttable
+     5,  # 12 peelable
+     5,  # 13 coatable
+     3,  # 14 spreadable
+     3,  # 15 topable
+    10,  # 16 dissolvable
+     5,  # 17 shreddable
+    15,  # 18 steamable
+     2,  # 19 measureable
+    10,  # 20 kneadable
+     8,  # 21 meltable
+     5,  # 22 cleanable
+    10,  # 23 blendable
+    30,  # 24 freezeable
+    20,  # 25 chillable
+    10,  # 26 coolable
+    15,  # 27 thickenable
+    20,  # 28 dryable
+     5,  # 29 drainable
+    15,  # 30 evaporatable
+    20,  # 31 soakable
+     3,  # 32 squeezable
+    30,  # 33 bakeable
+    25,  # 34 marinateable
+    10,  # 35 softenable
+     3,  # 36 scoopable
+     3,  # 37 seasonable
+     3,  # 38 pourable
+    15,  # 39 rehydrateable
+    20,  # 40 smokeable
+     8,  # 41 breadable
+     5,  # 42 skewerable
+     5,  # 43 microwaveable
+     3,  # 44 rinsable
+     5,  # 45 strainable
+     3,  # 46 siftable
+    30,  # 47 fermentable
+    20,  # 48 boilable
+    10,  # 49 stuffable
+     5,  # 50 stackable
 ], dtype=jnp.int32)
 
-
-# ---------------------------------------------------------------------------
-# Tool type constants
-# ---------------------------------------------------------------------------
-
-TOOL_CUTTING_BOARD  = 0
-TOOL_POT            = 1
-TOOL_PAN            = 2
-TOOL_OVEN           = 3
-TOOL_BLENDER        = 4
-TOOL_MIXING_BOWL    = 5
-TOOL_GRILL          = 6
-N_TOOL_TYPES        = 7
-
-TOOL_COOK_TIMES = jnp.array([5, 20, 15, 30, 10, 5, 20], dtype=jnp.int32)
-
-TOOL_NAMES = ["cutting_board", "pot", "pan", "oven", "blender", "mixing_bowl", "grill"]
+TOOL_NAMES = [
+    "formable", "crackable", "poundable", "mashable", "cookable",
+    "storable", "stewable", "stirrable", "sweetenable", "toastable",
+    "tearable", "cuttable", "peelable", "coatable", "spreadable",
+    "topable", "dissolvable", "shreddable", "steamable", "measureable",
+    "kneadable", "meltable", "cleanable", "blendable", "freezeable",
+    "chillable", "coolable", "thickenable", "dryable", "drainable",
+    "evaporatable", "soakable", "squeezable", "bakeable", "marinateable",
+    "softenable", "scoopable", "seasonable", "pourable", "rehydrateable",
+    "smokeable", "breadable", "skewerable", "microwaveable", "rinsable",
+    "strainable", "siftable", "fermentable", "boilable", "stuffable",
+    "stackable",
+]
 
 
 # ---------------------------------------------------------------------------

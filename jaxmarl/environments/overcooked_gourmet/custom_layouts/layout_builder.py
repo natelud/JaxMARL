@@ -112,22 +112,71 @@ from flax.core.frozen_dict import FrozenDict
 
 _STANDARD_ITEM_TYPES = {"pot", "onion_pile", "plate_pile", "goal"}
 
-# GourmetOvercooked tool names → tool-type integer
-# (cutting_board=0, pot=1, pan=2, oven=3, blender=4, mixing_bowl=5, grill=6)
+# GourmetOvercooked tool names → tool-type integer (one per canonical affordance)
 _TOOL_NAME_TO_INT = {
-    "cutting_board": 0,
-    "pot":           1,
-    "pan":           2,
-    "oven":          3,
-    "blender":       4,
-    "mixing_bowl":   5,
-    "grill":         6,
+    "formable":      0,
+    "crackable":     1,
+    "poundable":     2,
+    "mashable":      3,
+    "cookable":      4,
+    "storable":      5,
+    "stewable":      6,
+    "stirrable":     7,
+    "sweetenable":   8,
+    "toastable":     9,
+    "tearable":     10,
+    "cuttable":     11,
+    "peelable":     12,
+    "coatable":     13,
+    "spreadable":   14,
+    "topable":      15,
+    "dissolvable":  16,
+    "shreddable":   17,
+    "steamable":    18,
+    "measureable":  19,
+    "kneadable":    20,
+    "meltable":     21,
+    "cleanable":    22,
+    "blendable":    23,
+    "freezeable":   24,
+    "chillable":    25,
+    "coolable":     26,
+    "thickenable":  27,
+    "dryable":      28,
+    "drainable":    29,
+    "evaporatable": 30,
+    "soakable":     31,
+    "squeezable":   32,
+    "bakeable":     33,
+    "marinateable": 34,
+    "softenable":   35,
+    "scoopable":    36,
+    "seasonable":   37,
+    "pourable":     38,
+    "rehydrateable":39,
+    "smokeable":    40,
+    "breadable":    41,
+    "skewerable":   42,
+    "microwaveable":43,
+    "rinsable":     44,
+    "strainable":   45,
+    "siftable":     46,
+    "fermentable":  47,
+    "boilable":     48,
+    "stuffable":    49,
+    "stackable":    50,
+    # Legacy aliases (old 7-tool names → nearest canonical affordance)
+    "cutting_board": 11,   # → cuttable
+    "pot":           48,   # → boilable
+    "pan":            4,   # → cookable
+    "oven":          33,   # → bakeable
+    "blender":       23,   # → blendable
+    "mixing_bowl":    7,   # → stirrable
+    "grill":         40,   # → smokeable
 }
 
-# Items that unambiguously signal gourmet mode.  "pot" is intentionally absent:
-# it appears in both standard and gourmet; a non-pot gourmet item triggers it.
-_GOURMET_TRIGGER_TYPES = {"dispenser", "cutting_board", "pan", "oven",
-                          "blender", "mixing_bowl", "grill"}
+# Items that unambiguously signal gourmet mode.
+_GOURMET_TRIGGER_TYPES = {"dispenser"} | set(_TOOL_NAME_TO_INT.keys())
 
 ALL_ITEM_TYPES = _STANDARD_ITEM_TYPES | _GOURMET_TRIGGER_TYPES
 

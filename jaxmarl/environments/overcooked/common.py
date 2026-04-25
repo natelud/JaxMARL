@@ -19,37 +19,6 @@ OBJECT_TO_INDEX = {
 	"pot": 8,
 	"dish": 9,
 	"agent": 10,
-	# Cookable tool types — all share the same 3-ingredient + timer status
-	# encoding as pot.  Add a matching use_X action in Actions and a layout
-	# key <name>_idx to enable a tool in a specific environment.
-	"cutting_board": 11,
-	"pan":           12,
-	"oven":          13,
-	"blender":       14,
-	"mixing_bowl":   15,
-	"grill":         16,
-}
-
-# Ordered tuple of every tool object-type ID (for iteration in JAX loops).
-ALL_TOOL_IDS = (
-	OBJECT_TO_INDEX["pot"],
-	OBJECT_TO_INDEX["cutting_board"],
-	OBJECT_TO_INDEX["pan"],
-	OBJECT_TO_INDEX["oven"],
-	OBJECT_TO_INDEX["blender"],
-	OBJECT_TO_INDEX["mixing_bowl"],
-	OBJECT_TO_INDEX["grill"],
-)
-
-# Color index used when placing each tool in the maze map.
-TOOL_COLORS = {
-	OBJECT_TO_INDEX["pot"]:           7,  # black
-	OBJECT_TO_INDEX["cutting_board"]: 8,  # orange
-	OBJECT_TO_INDEX["pan"]:           5,  # grey
-	OBJECT_TO_INDEX["oven"]:          0,  # red
-	OBJECT_TO_INDEX["blender"]:       2,  # blue
-	OBJECT_TO_INDEX["mixing_bowl"]:   3,  # purple
-	OBJECT_TO_INDEX["grill"]:         7,  # black
 }
 
 
@@ -80,24 +49,17 @@ COLOR_TO_INDEX = {
 
 
 OBJECT_INDEX_TO_VEC = jnp.array([
-	jnp.array([OBJECT_TO_INDEX['unseen'],        0,                          0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['empty'],         0,                          0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['wall'],          COLOR_TO_INDEX['grey'],     0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['onion'],         COLOR_TO_INDEX['yellow'],   0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['onion_pile'],    COLOR_TO_INDEX['yellow'],   0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['plate'],         COLOR_TO_INDEX['white'],    0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['plate_pile'],    COLOR_TO_INDEX['white'],    0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['goal'],          COLOR_TO_INDEX['green'],    0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['pot'],           COLOR_TO_INDEX['black'],    0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['dish'],          COLOR_TO_INDEX['white'],    0], dtype=jnp.uint8),
-	jnp.array([OBJECT_TO_INDEX['agent'],         COLOR_TO_INDEX['red'],      0], dtype=jnp.uint8),
-	# New tool types (indices must match OBJECT_TO_INDEX values above)
-	jnp.array([OBJECT_TO_INDEX['cutting_board'], COLOR_TO_INDEX['orange'],   0], dtype=jnp.uint8),  # 11
-	jnp.array([OBJECT_TO_INDEX['pan'],           COLOR_TO_INDEX['grey'],     0], dtype=jnp.uint8),  # 12
-	jnp.array([OBJECT_TO_INDEX['oven'],          COLOR_TO_INDEX['red'],      0], dtype=jnp.uint8),  # 13
-	jnp.array([OBJECT_TO_INDEX['blender'],       COLOR_TO_INDEX['blue'],     0], dtype=jnp.uint8),  # 14
-	jnp.array([OBJECT_TO_INDEX['mixing_bowl'],   COLOR_TO_INDEX['purple'],   0], dtype=jnp.uint8),  # 15
-	jnp.array([OBJECT_TO_INDEX['grill'],         COLOR_TO_INDEX['black'],    0], dtype=jnp.uint8),  # 16
+	jnp.array([OBJECT_TO_INDEX['unseen'], 0, 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['empty'], 0, 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['wall'], COLOR_TO_INDEX['grey'], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['onion'], COLOR_TO_INDEX["yellow"], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['onion_pile'], COLOR_TO_INDEX["yellow"], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['plate'], COLOR_TO_INDEX["white"], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['plate_pile'], COLOR_TO_INDEX["white"], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['goal'], COLOR_TO_INDEX['green'], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['pot'], COLOR_TO_INDEX['black'], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['dish'], COLOR_TO_INDEX["white"], 0], dtype=jnp.uint8),
+	jnp.array([OBJECT_TO_INDEX['agent'], COLOR_TO_INDEX['red'], 0], dtype=jnp.uint8),  					# Default color and direction
 ])
 
 
@@ -125,11 +87,7 @@ def make_overcooked_map(
 	dish_pos,
 	pad_obs=False,
 	num_agents=2,
-	agent_view_size=5,
-	extra_tools=None,
-):
-	"""extra_tools: list of (positions, obj_type_id, statuses) for non-pot tools.
-	   Each entry places tools of type obj_type_id at the given positions."""
+	agent_view_size=5):
 
 	# Expand maze map to H x W x C
 	empty = jnp.array([OBJECT_TO_INDEX['empty'], 0, 0], dtype=jnp.uint8)
@@ -172,20 +130,6 @@ def make_overcooked_map(
 		dtype=jnp.uint8
 	)
 	maze_map = maze_map.at[pot_y, pot_x, :].set(pots)
-
-	# Add any extra tool types (cutting_board, pan, oven, blender, mixing_bowl, grill).
-	# extra_tools: list of (positions (n,2), obj_type_id int, statuses (n,) array)
-	if extra_tools:
-		for positions, obj_type_id, statuses in extra_tools:
-			if positions.shape[0] > 0:
-				n = positions.shape[0]
-				color = TOOL_COLORS[obj_type_id]
-				tool_vecs = jnp.concatenate([
-					jnp.full((n, 1), obj_type_id, dtype=jnp.uint8),
-					jnp.full((n, 1), color,        dtype=jnp.uint8),
-					statuses.reshape(n, 1).astype(jnp.uint8),
-				], axis=1)
-				maze_map = maze_map.at[positions[:, 1], positions[:, 0], :].set(tool_vecs)
 
 	# TODO: maze_map += onion * onion_mask ...
 

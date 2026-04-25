@@ -291,4 +291,3 @@ if __name__ == '__main__':
         else:
             viz.window.reg_key_handler(partial(key_handler, env, extras))
             viz.show(block=True)
-

@@ -1,5 +1,9 @@
 """
-layouts.py — Kitchen layout generation for GourmetOvercooked.
+layouts.py — Kitchen layout utilities for GourmetOvercooked.
+
+Named layouts live in custom_layouts/ as individual .py files.
+Use ``from jaxmarl.environments.overcooked_gourmet.custom_layouts import load, list_layouts``
+to load them by name.
 
 Layout representation
 ---------------------
@@ -7,7 +11,7 @@ A GourmetLayout is a dict (FrozenDict) with these keys:
 
   height, width          : grid dimensions (inner, not padded)
   wall_idx               : flat indices of counter/wall cells
-  agent_idx              : flat indices of two agent spawn positions
+  agent_idx              : flat indices of agent spawn positions
   goal_idx               : flat indices of delivery goal cells
   plate_pile_idx         : flat index of the plate-pile cell
   dispenser_slots        : flat indices of ingredient dispenser cells
@@ -33,23 +37,24 @@ import numpy as np
 from flax.core.frozen_dict import FrozenDict
 
 from .common import (
-    TOOL_CUTTING_BOARD, TOOL_POT, TOOL_PAN, TOOL_OVEN,
-    TOOL_BLENDER, TOOL_MIXING_BOWL, TOOL_GRILL, TOOL_NAMES,
+    TOOL_CUTTABLE, TOOL_BOILABLE, TOOL_COOKABLE, TOOL_BAKEABLE,
+    TOOL_BLENDABLE, TOOL_STIRRABLE, TOOL_SMOKEABLE, TOOL_NAMES,
 )
 
 
 # ---------------------------------------------------------------------------
-# Tool character → tool type
+# Tool character → tool type (for procedural layout strings)
+# Only 7 chars used in make_layout; full tool set accessible via layout_builder.
 # ---------------------------------------------------------------------------
 
 CHAR_TO_TOOL = {
-    "c": TOOL_CUTTING_BOARD,
-    "p": TOOL_POT,
-    "P": TOOL_PAN,
-    "O": TOOL_OVEN,
-    "b": TOOL_BLENDER,
-    "m": TOOL_MIXING_BOWL,
-    "g": TOOL_GRILL,
+    "c": TOOL_CUTTABLE,
+    "p": TOOL_BOILABLE,
+    "P": TOOL_COOKABLE,
+    "O": TOOL_BAKEABLE,
+    "b": TOOL_BLENDABLE,
+    "m": TOOL_STIRRABLE,
+    "g": TOOL_SMOKEABLE,
 }
 
 TOOL_TO_CHAR = {v: k for k, v in CHAR_TO_TOOL.items()}
@@ -162,60 +167,6 @@ def make_layout(n_dispensers: int, tool_type_sequence: list) -> dict:
 
     grid_str = "\n".join("".join(row) for row in grid)
     return from_string(grid_str)
-
-
-# ---------------------------------------------------------------------------
-# Named reference layouts
-# ---------------------------------------------------------------------------
-
-LAYOUT_SMALL = from_string("""
-WWWWWWWW
-WDDDBBXW
-W      W
-W      W
-WcppPPXW
-WWWWWWWW
-""".strip())
-
-LAYOUT_MEDIUM = from_string("""
-WWWWWWWWWW
-WDDDDDBBXW
-W        W
-W        W
-WcpPOObXXW
-WWWWWWWWWW
-""".strip())
-
-LAYOUT_LARGE = from_string("""
-WWWWWWWWWWWWW
-WDDDDDDDDBBXW
-W           W
-W           W
-WcpPOObmmgXXW
-WWWWWWWWWWWWW
-""".strip())
-
-LAYOUT_CORRIDOR = from_string("""
-WWWWWWWWWWW
-WDDDBBW  XW
-W      W  W
-W  A   W  W
-W    AWWWWW
-WcpPOObbggW
-WWWWWWWWWWW
-""".strip())
-
-
-# ---------------------------------------------------------------------------
-# Gourmet layout registry
-# ---------------------------------------------------------------------------
-
-gourmet_layouts = {
-    "small":    LAYOUT_SMALL,
-    "medium":   LAYOUT_MEDIUM,
-    "large":    LAYOUT_LARGE,
-    "corridor": LAYOUT_CORRIDOR,
-}
 
 
 # ---------------------------------------------------------------------------

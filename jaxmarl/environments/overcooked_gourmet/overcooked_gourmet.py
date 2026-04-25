@@ -3,7 +3,7 @@ env.py — GourmetOvercooked JAX Environment
 ==========================================
 A generalised, recipe-driven extension of Overcooked supporting:
 
-  • 301 MealDB recipes (538 ingredients, 7 tool types)
+  • 301 MealDB recipes (538 ingredients, 51 tool types)
   • Multi-ingredient cooking stations (add ingredients → cook → plate)
   • Multi-component plate assembly (collect outputs from multiple tools)
   • Selectable target recipe(s) via `recipe_ids` argument
@@ -37,8 +37,7 @@ from .common import (
     FIXED_H, FIXED_W,
     # object type constants
     OBJ_EMPTY, OBJ_WALL, OBJ_GOAL, OBJ_PLATE_PILE, OBJ_AGENT,
-    OBJ_DISPENSER, OBJ_CUTTING_BOARD, OBJ_POT, OBJ_PAN, OBJ_OVEN,
-    OBJ_BLENDER, OBJ_MIXING_BOWL, OBJ_GRILL,
+    OBJ_DISPENSER, OBJ_CUTTING_BOARD,
     OBJ_PLATE_ON_CTR, OBJ_RAW_ON_CTR, N_OBJ_TYPES,
     TOOL_TYPE_TO_OBJ,
     # tool constants
@@ -253,8 +252,8 @@ class GourmetOvercooked(MultiAgentEnv):
         if len(self._cached_resets) == 1:
             return self._cached_resets[0]
         key, rk = jax.random.split(key)
-        pick = int(jax.random.randint(rk, (), 0, len(self._cached_resets)))
-        return self._cached_resets[pick]
+        pick = jax.random.randint(rk, (), 0, len(self._cached_resets))
+        return jax.lax.switch(pick, [lambda r=r: r for r in self._cached_resets])
 
     def _reset_for_recipe(self, key, recipe_idx: int):
         H, W = FIXED_H, FIXED_W
@@ -421,14 +420,13 @@ class GourmetOvercooked(MultiAgentEnv):
 
         _set(int(plate_pile_pos[1]), int(plate_pile_pos[0]), OBJ_PLATE_PILE, 6, 0)
 
-        tool_colors = [2, 7, 5, 4, 8, 6, 0]
         for i in range(MAX_TOOLS):
             if not tool_active[i]:
                 continue
             tx, ty = int(tool_pos[i, 0]), int(tool_pos[i, 1])
             tt = int(tool_type_arr[i])
             obj = int(TOOL_TYPE_TO_OBJ[tt])
-            _set(ty, tx, obj, tool_colors[tt], i)
+            _set(ty, tx, obj, (tt % 9) + 1, i)
 
         for i in range(MAX_DISP):
             if not disp_active[i]:
