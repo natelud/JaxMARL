@@ -464,19 +464,35 @@ class GourmetOvercooked(MultiAgentEnv):
         plate_pile_pos = np.array([px0, py0], dtype=np.int32)
 
         # Dispensers
+        # Two cases:
+        #   1. Layout pinned specific ingredient IDs → use them.
+        #   2. Layout has generic dispensers ({"type": "dispenser", "count": N}
+        #      with no ingredient_id) → auto-assign from the active recipe's
+        #      unique ingredients, so the placed dispensers actually hold the
+        #      ingredients the recipe needs. Truncate to the layout's slot
+        #      count; deactivate any extra slots so they remain plain counters.
         disp_flat = np.asarray(layout["dispenser_slots"])
-        n_disp    = min(len(disp_flat), MAX_DISP)
+        n_disp_layout = min(len(disp_flat), MAX_DISP)
         disp_pos    = np.zeros((MAX_DISP, 2), dtype=np.int32)
         disp_ingr   = np.full((MAX_DISP,), -1, dtype=np.int32)
         disp_active = np.zeros((MAX_DISP,), dtype=bool)
         disp_ids    = (np.asarray(layout["dispenser_ingredient_ids"])
                        if "dispenser_ingredient_ids" in layout else None)
-        for i in range(n_disp):
+
+        if disp_ids is not None:
+            actual_ingr_ids = list(disp_ids)
+        else:
+            actual_ingr_ids = list(self._rec_unique_ingrs[recipe_idx])
+
+        n_disp_active = min(n_disp_layout, len(actual_ingr_ids))
+        for i in range(n_disp_layout):
             dy, dx = divmod(int(disp_flat[i]), W)
             disp_pos[i] = [dx, dy]
-            if disp_ids is not None and i < len(disp_ids):
-                disp_ingr[i] = int(disp_ids[i])
-            disp_active[i] = True
+            if i < n_disp_active:
+                disp_ingr[i]   = int(actual_ingr_ids[i])
+                disp_active[i] = True
+            # else: leave inactive — the cell remains a wall counter (no
+            # dispenser drawn), since wall_map already includes this position.
 
         # Tools: match layout tool types to recipe component tool types
         tool_slots    = layout["tool_slots"]   # list of (flat_idx, tool_type_int)

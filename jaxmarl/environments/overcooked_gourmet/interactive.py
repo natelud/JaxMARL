@@ -38,22 +38,67 @@ from jaxmarl.environments.overcooked_gourmet.common import (
 
 # ---------------------------------------------------------------------------
 # Force an interactive matplotlib backend before importing pyplot.
-# This must happen before any `import matplotlib.pyplot` to take effect.
+# matplotlib.use("TkAgg") does NOT verify the backend is functional — it
+# only fails if pyplot is already loaded. So calling matplotlib.use("TkAgg")
+# always "succeeds" and matplotlib silently falls back to the non-interactive
+# Agg backend at first plt call when tkinter isn't installed. Agg drops all
+# keyboard events, which is the most common reason "the keyboard doesn't work".
+#
+# Robust selection: actually try to import each backend's GUI library before
+# setting it. Print which backend was chosen so the user can diagnose.
 # ---------------------------------------------------------------------------
-import matplotlib as _mpl
-if os.environ.get("MPLBACKEND") is None and "matplotlib.pyplot" not in sys.modules:
-    for _backend in ("TkAgg", "Qt5Agg", "Qt4Agg", "GTK3Agg", "wxAgg"):
+def _select_interactive_backend():
+    import importlib
+    if os.environ.get("MPLBACKEND") is not None:
+        return None  # User has explicitly chosen one
+    if "matplotlib.pyplot" in sys.modules:
+        return None  # pyplot already loaded — can't switch
+    # (backend_name, gui_library_to_test)
+    candidates = [
+        ("TkAgg",   "tkinter"),
+        ("Qt5Agg",  "PyQt5.QtWidgets"),
+        ("Qt5Agg",  "PySide2.QtWidgets"),
+        ("QtAgg",   "PyQt6.QtWidgets"),
+        ("QtAgg",   "PySide6.QtWidgets"),
+        ("GTK3Agg", "gi"),
+        ("WxAgg",   "wx"),
+    ]
+    for backend_name, gui_module in candidates:
         try:
-            _mpl.use(_backend)
-            break
-        except Exception:
+            importlib.import_module(gui_module)
+        except ImportError:
             continue
+        return backend_name
+    return None
+
+
+import matplotlib as _mpl
+_chosen_backend = _select_interactive_backend()
+if _chosen_backend is not None:
+    _mpl.use(_chosen_backend)
 
 try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
 except ImportError as e:
     raise SystemExit(f"matplotlib is required for interactive mode: {e}")
+
+# Diagnose: print the active backend so users can immediately tell whether
+# they're on an interactive backend or accidentally on Agg.
+_active_backend = _mpl.get_backend()
+print(f"[interactive] matplotlib backend = {_active_backend}", flush=True)
+if _active_backend.lower() in ("agg", "pdf", "svg", "ps", "cairo", "module://matplotlib_inline.backend_inline"):
+    print("[interactive] WARNING: this backend is non-interactive — keyboard "
+          "input will NOT work. Install one of: python3-tk (apt) / tkinter, "
+          "PyQt5, PyQt6, PySide6. On Linux over SSH you also need X11 "
+          "forwarding (`ssh -X`) or VNC. Set MPLBACKEND to override.",
+          flush=True)
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") \
+        and not os.environ.get("WAYLAND_DISPLAY"):
+    print("[interactive] WARNING: $DISPLAY is not set. If you are running "
+          "over SSH, reconnect with `ssh -X` (or `ssh -Y`). If you are on a "
+          "headless machine, the matplotlib window cannot open and keyboard "
+          "input cannot be delivered.", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +381,44 @@ def _parse_recipe_ids(s: str):
     return parts[0] if len(parts) == 1 else parts
 
 
+def _find_compatible_recipe(layout) -> int | None:
+    """Pick a recipe whose ingredients fit the layout's dispenser count
+    and whose component tool_types are all available in the layout's tool slots.
+
+    Returns a recipe_id, or None if no recipe in the DB is compatible.
+    """
+    import json
+    import os as _os
+    # Load the recipe DB by walking up from this file.
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    db = None
+    for _ in range(10):
+        candidate = _os.path.join(here, "data", "gourmet_recipe_db.json")
+        if _os.path.isfile(candidate):
+            with open(candidate) as fh:
+                db = json.load(fh)
+            break
+        here = _os.path.dirname(here)
+    if db is None:
+        return None
+
+    n_disp = int(len(layout.get("dispenser_slots", [])))
+    layout_tool_types = set(int(tt) for _, tt in layout.get("tool_slots", []))
+
+    for recipe in db["recipes"]:
+        unique_ingrs = set()
+        for c in recipe["components"]:
+            for ing in c["ingredients"]:
+                unique_ingrs.add(ing["ingredient_id"])
+        if len(unique_ingrs) > n_disp:
+            continue
+        recipe_tools = set(int(c["tool_type"]) for c in recipe["components"])
+        if not recipe_tools.issubset(layout_tool_types):
+            continue
+        return int(recipe["id"])
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Interactive GourmetOvercooked player",
@@ -380,6 +463,7 @@ def main():
 
     layout     = None
     recipe_ids = _parse_recipe_ids(args.recipe_ids)
+    user_set_recipes = (args.recipe_ids != "all")
 
     if args.layout is not None:
         from jaxmarl.environments.overcooked_gourmet.custom_layouts import load
@@ -387,6 +471,27 @@ def main():
         # Use recipe_ids embedded in the layout unless the user overrode them
         if args.recipe_ids == "all" and "recipe_ids" in layout:
             recipe_ids = layout["recipe_ids"]
+
+    # When --layout is given and the user did NOT pin a specific recipe, pick a
+    # recipe whose ingredient count fits the layout's dispenser slot count and
+    # whose required tool types are all present in the layout's tool slots.
+    # Otherwise the agent literally cannot deliver the recipe (e.g. recipe 0
+    # is "Apple Frangipan Tart" — 8 unique ingredients across 6 different
+    # tool types, totally incompatible with cramped_room's 2 dispensers + pot
+    # + cutting_board).
+    if args.layout is not None and not user_set_recipes:
+        compat = _find_compatible_recipe(layout)
+        if compat is not None:
+            recipe_ids = compat
+            print(f"[interactive] Auto-picked compatible recipe {compat} for "
+                  f"layout '{args.layout}'. Pass --recipe_ids <id> to override.")
+        else:
+            print(f"[interactive] WARNING: no recipe in the DB is fully "
+                  f"compatible with layout '{args.layout}' (n_dispensers="
+                  f"{len(layout.get('dispenser_slots', []))}, tools="
+                  f"{sorted(set(int(tt) for _, tt in layout.get('tool_slots', [])))}). "
+                  f"Falling back to recipe 0 — the agent may be unable to deliver.")
+            recipe_ids = 0
 
     # Narrow recipe_ids="all" to a single recipe for interactive play.
     # GourmetOvercooked.__init__ eagerly builds one cached reset state (incl.
