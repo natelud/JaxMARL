@@ -227,8 +227,15 @@ class InteractiveGourmetOvercooked:
         self.ctrl        = controlled_agent
         self.recipe_ids  = recipe_ids
         self._rng        = jax.random.PRNGKey(seed)
-        self._jit_reset  = jax.jit(self.env.reset)
-        self._jit_step   = jax.jit(self.env.step)
+
+        # Run env.reset / env.step EAGERLY — interactive play is human-paced
+        # (1 step per keypress) and JITting reset over a layout with
+        # recipe_ids="all" traces all 301 cached reset states, which causes
+        # multi-minute compile times and CUDA-graph OOM on commodity GPUs.
+        # Eager evaluation runs each call in tens of milliseconds and uses no
+        # extra GPU memory.
+        self._reset_fn = self.env.reset
+        self._step_fn  = self.env.step
 
         # Rendering geometry: crop away the view-padding border
         self._H   = self.env._H
@@ -255,7 +262,7 @@ class InteractiveGourmetOvercooked:
         return sub
 
     def _reset(self):
-        self.obs, self.state = self._jit_reset(self._split())
+        self.obs, self.state = self._reset_fn(self._split())
         self.step         = 0
         self.total_reward = 0.0
         print(f"\nEpisode reset — recipe: {self.recipe_label}")
@@ -267,7 +274,7 @@ class InteractiveGourmetOvercooked:
             )
             for i in range(self.num_agents)
         }
-        self.obs, self.state, rewards, dones, _ = self._jit_step(
+        self.obs, self.state, rewards, dones, _ = self._step_fn(
             self._split(), self.state, actions
         )
         self.step         += 1
