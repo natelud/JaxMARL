@@ -5,7 +5,10 @@ Usage
 -----
     python -m jaxmarl.environments.overcooked_gourmet.interactive
     python -m jaxmarl.environments.overcooked_gourmet.interactive --recipe_ids 5
-    python -m jaxmarl.environments.overcooked_gourmet.interactive --recipe_ids 5,42 --num_agents 3
+    python -m jaxmarl.environments.overcooked_gourmet.interactive --num_agents 3
+    python -m jaxmarl.environments.overcooked_gourmet.interactive --layout cramped_room
+    python -m jaxmarl.environments.overcooked_gourmet.interactive --layout chicken_alfredo
+    python -m jaxmarl.environments.overcooked_gourmet.interactive --list_layouts
 
 Controls
 --------
@@ -19,6 +22,7 @@ Controls
 """
 
 import argparse
+import os
 import sys
 import numpy as np
 import jax
@@ -32,6 +36,19 @@ from jaxmarl.environments.overcooked_gourmet.common import (
     OBJ_PLATE_ON_CTR, OBJ_RAW_ON_CTR, N_TOOL_TYPES,
 )
 
+# ---------------------------------------------------------------------------
+# Force an interactive matplotlib backend before importing pyplot.
+# This must happen before any `import matplotlib.pyplot` to take effect.
+# ---------------------------------------------------------------------------
+import matplotlib as _mpl
+if os.environ.get("MPLBACKEND") is None and "matplotlib.pyplot" not in sys.modules:
+    for _backend in ("TkAgg", "Qt5Agg", "Qt4Agg", "GTK3Agg", "wxAgg"):
+        try:
+            _mpl.use(_backend)
+            break
+        except Exception:
+            continue
+
 try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
@@ -43,10 +60,8 @@ except ImportError as e:
 # Visual configuration
 # ---------------------------------------------------------------------------
 
-# Per-object background colours (RGB 0–1).
-# Tool OBJ types occupy OBJ_CUTTING_BOARD .. OBJ_CUTTING_BOARD+N_TOOL_TYPES-1;
-# they are generated below with a HSV colour wheel so each gets a distinct hue.
 import colorsys as _cs
+
 
 def _tool_colors(n):
     """Return n visually distinct RGB colours for tool stations."""
@@ -56,6 +71,7 @@ def _tool_colors(n):
         r, g, b = _cs.hsv_to_rgb(h, 0.55, 0.75)
         colors[OBJ_CUTTING_BOARD + i] = [r, g, b]
     return colors
+
 
 _OBJ_COLORS = {
     OBJ_EMPTY:       [0.94, 0.90, 0.82],  # warm cream
@@ -86,7 +102,6 @@ _OBJ_LABELS = {
     OBJ_PLATE_ON_CTR:"◌",
     OBJ_RAW_ON_CTR:  "·",
 }
-# Each tool gets a 1-2 char abbreviation (first 2 letters of its name).
 for _i, _name in enumerate(TOOL_NAMES):
     _OBJ_LABELS[OBJ_CUTTING_BOARD + _i] = _name[:2].upper()
 
@@ -101,13 +116,16 @@ _KEY_TO_ACTION = {
 
 
 # ---------------------------------------------------------------------------
-# Renderer
+# Renderer  (uses only the actual game area, not the padded maze_map)
 # ---------------------------------------------------------------------------
 
-def _build_rgb(state, num_agents: int) -> np.ndarray:
-    """Return an (H, W, 3) float32 image from the current maze state."""
-    obj_layer = np.array(state.maze_map[:, :, 0], dtype=int)
-    H, W = obj_layer.shape
+def _build_rgb(state, num_agents: int, H: int, W: int, pad: int) -> np.ndarray:
+    """Return an (H, W, 3) float32 image of the actual game grid.
+
+    maze_map has a PAD-wide border on every side used for agent view
+    calculations.  We crop it away here so agents appear inside the room.
+    """
+    obj_layer = np.array(state.maze_map[pad:pad + H, pad:pad + W, 0], dtype=int)
     rgb = np.ones((H, W, 3), dtype=np.float32)
 
     for r in range(H):
@@ -115,8 +133,7 @@ def _build_rgb(state, num_agents: int) -> np.ndarray:
             ot = obj_layer[r, c]
             rgb[r, c] = _OBJ_COLORS.get(ot, [0.5, 0.5, 0.5])
 
-    # Overdraw agent cells with per-agent colours.
-    # agent_pos is (num_agents, 2) in (x=col, y=row) convention.
+    # agent_pos is (num_agents, 2) in (x=col, y=row) unpadded game coordinates.
     agent_pos = np.array(state.agent_pos)
     for i in range(num_agents):
         col, row = int(agent_pos[i, 0]), int(agent_pos[i, 1])
@@ -127,12 +144,11 @@ def _build_rgb(state, num_agents: int) -> np.ndarray:
 
 
 def _render(state, num_agents: int, step: int, total_reward: float,
-            recipe_label: str, ax) -> None:
+            recipe_label: str, ax, H: int, W: int, pad: int) -> None:
     """Clear *ax* and draw the current state."""
     ax.clear()
 
-    rgb = _build_rgb(state, num_agents)
-    H, W = rgb.shape[:2]
+    rgb = _build_rgb(state, num_agents, H, W, pad)
 
     ax.imshow(rgb, interpolation="nearest", aspect="equal",
               extent=(-0.5, W - 0.5, H - 0.5, -0.5))
@@ -143,19 +159,22 @@ def _render(state, num_agents: int, step: int, total_reward: float,
     for j in range(W + 1):
         ax.axvline(j - 0.5, color="black", linewidth=0.4, alpha=0.35)
 
-    # Cell labels
-    obj_layer = np.array(state.maze_map[:, :, 0], dtype=int)
+    # Cell labels (use same cropped view)
+    obj_layer = np.array(state.maze_map[pad:pad + H, pad:pad + W, 0], dtype=int)
     agent_pos = np.array(state.agent_pos)
     agent_cells = {
         (int(agent_pos[i, 1]), int(agent_pos[i, 0])): i
         for i in range(num_agents)
     }
+    agent_inv = np.array(state.agent_inv)
     for r in range(H):
         for c in range(W):
             if (r, c) in agent_cells:
                 i = agent_cells[(r, c)]
-                ax.text(c, r, str(i), ha="center", va="center",
-                        fontsize=9, fontweight="bold", color="white",
+                inv_val = int(agent_inv[i])
+                lbl = str(i) + (f"\n[{inv_val}]" if inv_val != 0 else "")
+                ax.text(c, r, lbl, ha="center", va="center",
+                        fontsize=8, fontweight="bold", color="white",
                         zorder=3)
             else:
                 ot = obj_layer[r, c]
@@ -190,9 +209,20 @@ class InteractiveGourmetOvercooked:
     """Matplotlib-event-driven interactive session."""
 
     def __init__(self, recipe_ids, num_agents: int = 2,
-                 seed: int = 0, controlled_agent: int = 0):
-        self.env         = GourmetOvercooked(recipe_ids=recipe_ids,
-                                             num_agents=num_agents)
+                 seed: int = 0, controlled_agent: int = 0,
+                 layout=None):
+        if layout is not None:
+            self.env = GourmetOvercooked(
+                recipe_ids=recipe_ids,
+                num_agents=num_agents,
+                layout=layout,
+            )
+        else:
+            self.env = GourmetOvercooked(
+                recipe_ids=recipe_ids,
+                num_agents=num_agents,
+            )
+
         self.num_agents  = num_agents
         self.ctrl        = controlled_agent
         self.recipe_ids  = recipe_ids
@@ -200,12 +230,17 @@ class InteractiveGourmetOvercooked:
         self._jit_reset  = jax.jit(self.env.reset)
         self._jit_step   = jax.jit(self.env.step)
 
+        # Rendering geometry: crop away the view-padding border
+        self._H   = self.env._H
+        self._W   = self.env._W
+        self._pad = self.env.agent_view_size - 1
+
         self.step         = 0
         self.total_reward = 0.0
         self.state        = None
         self.obs          = None
 
-        # Derive a short recipe label for the title
+        # Recipe label for the title bar
         if recipe_ids == "all":
             self.recipe_label = "all recipes"
         elif isinstance(recipe_ids, int):
@@ -243,6 +278,7 @@ class InteractiveGourmetOvercooked:
                   f"cumulative {self.total_reward:.1f}")
         if dones["__all__"]:
             print(f"  Episode done! Total reward: {self.total_reward:.2f}")
+            self._reset()
 
     # ── matplotlib event handler ─────────────────────────────────────────────
 
@@ -259,21 +295,27 @@ class InteractiveGourmetOvercooked:
             return  # unrecognised key — don't redraw
 
         _render(self.state, self.num_agents, self.step,
-                self.total_reward, self.recipe_label, self._ax)
-        self._fig.canvas.draw_idle()
+                self.total_reward, self.recipe_label, self._ax,
+                self._H, self._W, self._pad)
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
 
     # ── Public run ───────────────────────────────────────────────────────────
 
     def run(self):
         self._reset()
 
-        self._fig, self._ax = plt.subplots(figsize=(12, 4))
+        # Scale figure size to the actual game grid
+        fig_w = max(6.0, self._W * 0.55)
+        fig_h = max(3.0, self._H * 0.90)
+        self._fig, self._ax = plt.subplots(figsize=(fig_w, fig_h))
         self._fig.tight_layout(pad=1.5)
         self._fig.canvas.mpl_connect("key_press_event", self._on_key)
 
         _render(self.state, self.num_agents, self.step,
-                self.total_reward, self.recipe_label, self._ax)
-        plt.show()
+                self.total_reward, self.recipe_label, self._ax,
+                self._H, self._W, self._pad)
+        plt.show(block=True)
 
 
 # ---------------------------------------------------------------------------
@@ -289,21 +331,55 @@ def _parse_recipe_ids(s: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Interactive GourmetOvercooked player"
+        description="Interactive GourmetOvercooked player",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
-    parser.add_argument("--recipe_ids", type=str, default="all",
-                        help="'all', a single int, or comma-separated ints (e.g. '5,42')")
+    parser.add_argument(
+        "--recipe_ids", type=str, default="all",
+        help="'all', a single int, or comma-separated ints (e.g. '5,42'). "
+             "Ignored when --layout supplies recipe_ids.",
+    )
     parser.add_argument("--num_agents", type=int, default=2)
     parser.add_argument("--seed",       type=int, default=0)
-    parser.add_argument("--agent",      type=int, default=0,
-                        help="Which agent index the keyboard controls (others hold still)")
+    parser.add_argument(
+        "--agent", type=int, default=0,
+        help="Which agent index the keyboard controls (others hold still).",
+    )
+    parser.add_argument(
+        "--layout", type=str, default=None,
+        help="Named custom layout to use (e.g. cramped_room, chicken_alfredo). "
+             "Run with --list_layouts to see all available names.",
+    )
+    parser.add_argument(
+        "--list_layouts", action="store_true",
+        help="Print all available layout names and exit.",
+    )
     args = parser.parse_args()
 
+    if args.list_layouts:
+        from jaxmarl.environments.overcooked_gourmet.custom_layouts import list_layouts
+        print("Available layouts:")
+        for name in list_layouts():
+            print(f"  {name}")
+        sys.exit(0)
+
+    layout     = None
+    recipe_ids = _parse_recipe_ids(args.recipe_ids)
+
+    if args.layout is not None:
+        from jaxmarl.environments.overcooked_gourmet.custom_layouts import load
+        layout = load(args.layout, seed=args.seed, num_agents=args.num_agents)
+        # Use recipe_ids embedded in the layout unless the user overrode them
+        if args.recipe_ids == "all" and "recipe_ids" in layout:
+            recipe_ids = layout["recipe_ids"]
+
     session = InteractiveGourmetOvercooked(
-        recipe_ids      = _parse_recipe_ids(args.recipe_ids),
-        num_agents      = args.num_agents,
-        seed            = args.seed,
-        controlled_agent= args.agent,
+        recipe_ids       = recipe_ids,
+        num_agents       = args.num_agents,
+        seed             = args.seed,
+        controlled_agent = args.agent,
+        layout           = layout,
     )
     session.run()
 
