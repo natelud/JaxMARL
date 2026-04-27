@@ -29,12 +29,6 @@ import jax
 import jax.numpy as jnp
 
 from jaxmarl.environments.overcooked_gourmet.overcooked_gourmet import GourmetOvercooked, Actions
-from jaxmarl.environments.overcooked_gourmet.common import (
-    TOOL_NAMES,
-    OBJ_EMPTY, OBJ_WALL, OBJ_GOAL, OBJ_PLATE_PILE, OBJ_AGENT,
-    OBJ_DISPENSER, OBJ_CUTTING_BOARD,
-    OBJ_PLATE_ON_CTR, OBJ_RAW_ON_CTR, N_TOOL_TYPES,
-)
 
 # ---------------------------------------------------------------------------
 # Force an interactive matplotlib backend before importing pyplot.
@@ -79,7 +73,6 @@ if _chosen_backend is not None:
 
 try:
     import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
 except ImportError as e:
     raise SystemExit(f"matplotlib is required for interactive mode: {e}")
 
@@ -102,53 +95,12 @@ if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") \
 
 
 # ---------------------------------------------------------------------------
-# Visual configuration
+# Renderer — classic Overcooked sprites via the shared gourmet visualizer.
 # ---------------------------------------------------------------------------
+from jaxmarl.viz.overcooked_gourmet_visualizer import (
+    render_state_pixels, add_hud,
+)
 
-import colorsys as _cs
-
-
-def _tool_colors(n):
-    """Return n visually distinct RGB colours for tool stations."""
-    colors = {}
-    for i in range(n):
-        h = i / n
-        r, g, b = _cs.hsv_to_rgb(h, 0.55, 0.75)
-        colors[OBJ_CUTTING_BOARD + i] = [r, g, b]
-    return colors
-
-
-_OBJ_COLORS = {
-    OBJ_EMPTY:       [0.94, 0.90, 0.82],  # warm cream
-    OBJ_WALL:        [0.32, 0.32, 0.32],  # charcoal
-    OBJ_GOAL:        [0.25, 0.72, 0.30],  # green
-    OBJ_PLATE_PILE:  [0.92, 0.92, 0.92],  # near-white
-    OBJ_AGENT:       [0.50, 0.50, 0.50],  # placeholder (overdrawn per agent)
-    OBJ_DISPENSER:   [0.95, 0.58, 0.15],  # orange
-    OBJ_PLATE_ON_CTR:[0.68, 0.84, 0.95],  # light blue
-    OBJ_RAW_ON_CTR:  [0.95, 0.85, 0.20],  # yellow
-}
-_OBJ_COLORS.update(_tool_colors(N_TOOL_TYPES))
-
-_AGENT_COLORS = [
-    [0.15, 0.40, 0.90],  # agent 0 — blue
-    [0.85, 0.18, 0.18],  # agent 1 — red
-    [0.18, 0.68, 0.28],  # agent 2 — green
-    [0.90, 0.52, 0.08],  # agent 3 — amber
-]
-
-# Short labels for fixed OBJ types; tool labels generated from TOOL_NAMES.
-_OBJ_LABELS = {
-    OBJ_EMPTY:       "",
-    OBJ_WALL:        "",
-    OBJ_GOAL:        "G",
-    OBJ_PLATE_PILE:  "♺",
-    OBJ_DISPENSER:   "D",
-    OBJ_PLATE_ON_CTR:"◌",
-    OBJ_RAW_ON_CTR:  "·",
-}
-for _i, _name in enumerate(TOOL_NAMES):
-    _OBJ_LABELS[OBJ_CUTTING_BOARD + _i] = _name[:2].upper()
 
 # Keyboard → action mapping
 _KEY_TO_ACTION = {
@@ -160,90 +112,24 @@ _KEY_TO_ACTION = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Renderer  (uses only the actual game area, not the padded maze_map)
-# ---------------------------------------------------------------------------
-
-def _build_rgb(state, num_agents: int, H: int, W: int, pad: int) -> np.ndarray:
-    """Return an (H, W, 3) float32 image of the actual game grid.
-
-    maze_map has a PAD-wide border on every side used for agent view
-    calculations.  We crop it away here so agents appear inside the room.
-    """
-    obj_layer = np.array(state.maze_map[pad:pad + H, pad:pad + W, 0], dtype=int)
-    rgb = np.ones((H, W, 3), dtype=np.float32)
-
-    for r in range(H):
-        for c in range(W):
-            ot = obj_layer[r, c]
-            rgb[r, c] = _OBJ_COLORS.get(ot, [0.5, 0.5, 0.5])
-
-    # agent_pos is (num_agents, 2) in (x=col, y=row) unpadded game coordinates.
-    agent_pos = np.array(state.agent_pos)
-    for i in range(num_agents):
-        col, row = int(agent_pos[i, 0]), int(agent_pos[i, 1])
-        if 0 <= row < H and 0 <= col < W:
-            rgb[row, col] = _AGENT_COLORS[i % len(_AGENT_COLORS)]
-
-    return rgb
-
-
 def _render(state, num_agents: int, step: int, total_reward: float,
-            recipe_label: str, ax, H: int, W: int, pad: int) -> None:
-    """Clear *ax* and draw the current state."""
+            recipe_label: str, ax, env) -> None:
+    """Clear *ax* and draw the current state in classic-Overcooked sprite style."""
     ax.clear()
 
-    rgb = _build_rgb(state, num_agents, H, W, pad)
+    px = render_state_pixels(state, env, with_labels=True)
+    title = f"Step {step}  |  Reward {total_reward:.1f}  |  {recipe_label}"
+    full = add_hud(px, title, num_agents=num_agents)
 
-    ax.imshow(rgb, interpolation="nearest", aspect="equal",
-              extent=(-0.5, W - 0.5, H - 0.5, -0.5))
-
-    # Faint grid lines
-    for i in range(H + 1):
-        ax.axhline(i - 0.5, color="black", linewidth=0.4, alpha=0.35)
-    for j in range(W + 1):
-        ax.axvline(j - 0.5, color="black", linewidth=0.4, alpha=0.35)
-
-    # Cell labels (use same cropped view)
-    obj_layer = np.array(state.maze_map[pad:pad + H, pad:pad + W, 0], dtype=int)
-    agent_pos = np.array(state.agent_pos)
-    agent_cells = {
-        (int(agent_pos[i, 1]), int(agent_pos[i, 0])): i
-        for i in range(num_agents)
-    }
-    agent_inv = np.array(state.agent_inv)
-    for r in range(H):
-        for c in range(W):
-            if (r, c) in agent_cells:
-                i = agent_cells[(r, c)]
-                inv_val = int(agent_inv[i])
-                lbl = str(i) + (f"\n[{inv_val}]" if inv_val != 0 else "")
-                ax.text(c, r, lbl, ha="center", va="center",
-                        fontsize=8, fontweight="bold", color="white",
-                        zorder=3)
-            else:
-                ot = obj_layer[r, c]
-                lbl = _OBJ_LABELS.get(ot, "")
-                if lbl:
-                    ax.text(c, r, lbl, ha="center", va="center",
-                            fontsize=7, color="white", zorder=3)
-
-    # Legend patches
-    legend = [
-        mpatches.Patch(color=_AGENT_COLORS[i % len(_AGENT_COLORS)],
-                       label=f"Agent {i}")
-        for i in range(num_agents)
-    ]
-    ax.legend(handles=legend, loc="upper right", fontsize=7,
-              framealpha=0.8, borderpad=0.4)
-
-    ax.set_title(
-        f"Step {step}  |  Reward {total_reward:.1f}  |  Recipe: {recipe_label}\n"
-        f"W/A/S/D or arrows = move   E/Space = interact   "
-        f"Backspace = reset   Esc/Q = quit",
-        fontsize=9,
+    ax.imshow(full, interpolation="nearest", aspect="equal")
+    ax.set_xticks([]); ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_xlabel(
+        "W/A/S/D or arrows = move   E/Space = interact   "
+        "Backspace = reset   Esc/Q = quit",
+        fontsize=8,
     )
-    ax.axis("off")
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +233,7 @@ class InteractiveGourmetOvercooked:
             return  # unrecognised key — don't redraw
 
         _render(self.state, self.num_agents, self.step,
-                self.total_reward, self.recipe_label, self._ax,
-                self._H, self._W, self._pad)
+                self.total_reward, self.recipe_label, self._ax, self.env)
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()
 
@@ -357,16 +242,15 @@ class InteractiveGourmetOvercooked:
     def run(self):
         self._reset()
 
-        # Scale figure size to the actual game grid
-        fig_w = max(6.0, self._W * 0.55)
-        fig_h = max(3.0, self._H * 0.90)
+        # Scale figure size to the actual game grid (32 px / cell + HUD bar)
+        fig_w = max(5.0, self._W * 0.6)
+        fig_h = max(3.0, self._H * 0.7 + 0.5)
         self._fig, self._ax = plt.subplots(figsize=(fig_w, fig_h))
-        self._fig.tight_layout(pad=1.5)
+        self._fig.tight_layout(pad=1.0)
         self._fig.canvas.mpl_connect("key_press_event", self._on_key)
 
         _render(self.state, self.num_agents, self.step,
-                self.total_reward, self.recipe_label, self._ax,
-                self._H, self._W, self._pad)
+                self.total_reward, self.recipe_label, self._ax, self.env)
         plt.show(block=True)
 
 
