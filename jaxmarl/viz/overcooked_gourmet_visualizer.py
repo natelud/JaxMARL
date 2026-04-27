@@ -231,6 +231,23 @@ def _overlay_labels(img: np.ndarray, state, env, tile_size: int) -> np.ndarray:
             n_have = int(state.plate_n_contents[pi])
             _draw(x, y, f"{n_have}/{n_req}")
 
+    # Loose raw ingredient on a counter (OBJ_RAW_ON_CTR) — show ingredient_id.
+    # The id is packed across maze_map channels 1 (high byte) and 2 (low byte)
+    # by `_case_drop._do_raw`, so we reassemble both. There's no state list of
+    # raw counter items, so we scan the cropped grid directly.
+    pad = int(env.agent_view_size) - 1
+    H, W = int(env._H), int(env._W)
+    raw_grid = np.asarray(state.maze_map[pad:pad + H, pad:pad + W, :])
+    raw_obj  = raw_grid[:, :, 0]
+    raw_high = raw_grid[:, :, 1].astype(np.int32)
+    raw_low  = raw_grid[:, :, 2].astype(np.int32)
+    for y in range(H):
+        for x in range(W):
+            if int(raw_obj[y, x]) != int(OBJ_RAW_ON_CTR):
+                continue
+            ingr_id = int((raw_high[y, x] << 8) | raw_low[y, x])
+            _draw(x, y, str(ingr_id))
+
     return np.array(pil_img)
 
 
