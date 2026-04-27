@@ -137,6 +137,7 @@ class GourmetOvercooked(MultiAgentEnv):
         expanded_actions: bool = False,
         recipe_db_path: Optional[str] = None,
         layout_seed: int = 0,
+        layout=None,
     ):
         super().__init__(num_agents=num_agents)
 
@@ -166,6 +167,7 @@ class GourmetOvercooked(MultiAgentEnv):
         self.expanded_actions   = expanded_actions
         self.agent_view_size    = 5
         self._layout_seed       = layout_seed
+        self._layout            = layout
 
         self._max_cook_time = float(max(TOOL_COOK_TIMES.tolist()))
 
@@ -176,14 +178,18 @@ class GourmetOvercooked(MultiAgentEnv):
         else:
             self.action_set = jnp.array(base_actions + [Actions.interact])
 
-        self._H = FIXED_H
-        self._W = FIXED_W
+        if layout is not None:
+            self._H = int(layout["height"])
+            self._W = int(layout["width"])
+        else:
+            self._H = FIXED_H
+            self._W = FIXED_W
 
         n_grid_ch   = self._n_grid_channels()
         n_flat      = MAX_COMP * 3 + 3
         self._n_grid_ch = n_grid_ch
         self._n_flat    = n_flat
-        flat_len        = FIXED_H * FIXED_W * (n_grid_ch + n_flat)
+        flat_len        = self._H * self._W * (n_grid_ch + n_flat)
         self.obs_shape  = (flat_len,)
 
         self.observation_spaces = {
@@ -276,7 +282,10 @@ class GourmetOvercooked(MultiAgentEnv):
         # Per-recipe RNG: different recipes get independent shuffles for the same seed.
         rng_np = np.random.RandomState((layout_seed, recipe_idx))
 
-        H, W = FIXED_H, FIXED_W
+        if self._layout is not None:
+            return self._reset_from_layout(key, recipe_idx, rng_np)
+
+        H, W = self._H, self._W
         recipe = self._all_recipes[recipe_idx]
         unique_ingrs = self._rec_unique_ingrs[recipe_idx]
         n_comps  = self._rec_n_comps[recipe_idx]
@@ -427,6 +436,150 @@ class GourmetOvercooked(MultiAgentEnv):
         obs = self.get_obs(state)
         return lax.stop_gradient(obs), lax.stop_gradient(state)
 
+    def _reset_from_layout(self, key, recipe_idx: int, rng_np):
+        """Build initial state from a pre-built FrozenDict layout (custom grid)."""
+        layout = self._layout
+        H, W   = self._H, self._W
+        recipe = self._all_recipes[recipe_idx]
+        n_comps = self._rec_n_comps[recipe_idx]
+        comps   = recipe["components"][:MAX_COMP]
+
+        # Wall map
+        wall_flat = np.asarray(layout["wall_idx"])
+        wall_map  = np.zeros((H, W), dtype=bool)
+        for fi in wall_flat:
+            wy, wx = divmod(int(fi), W)
+            wall_map[wy, wx] = True
+
+        # Goal positions
+        goal_flat = np.asarray(layout["goal_idx"])
+        goal_pos  = np.zeros((MAX_GOALS, 2), dtype=np.int32)
+        for i, fi in enumerate(goal_flat[:MAX_GOALS]):
+            gy, gx = divmod(int(fi), W)
+            goal_pos[i] = [gx, gy]
+
+        # Plate pile (first entry)
+        pp_flat = np.asarray(layout["plate_pile_idx"])
+        py0, px0 = divmod(int(pp_flat[0]), W)
+        plate_pile_pos = np.array([px0, py0], dtype=np.int32)
+
+        # Dispensers
+        disp_flat = np.asarray(layout["dispenser_slots"])
+        n_disp    = min(len(disp_flat), MAX_DISP)
+        disp_pos    = np.zeros((MAX_DISP, 2), dtype=np.int32)
+        disp_ingr   = np.full((MAX_DISP,), -1, dtype=np.int32)
+        disp_active = np.zeros((MAX_DISP,), dtype=bool)
+        disp_ids    = (np.asarray(layout["dispenser_ingredient_ids"])
+                       if "dispenser_ingredient_ids" in layout else None)
+        for i in range(n_disp):
+            dy, dx = divmod(int(disp_flat[i]), W)
+            disp_pos[i] = [dx, dy]
+            if disp_ids is not None and i < len(disp_ids):
+                disp_ingr[i] = int(disp_ids[i])
+            disp_active[i] = True
+
+        # Tools: match layout tool types to recipe component tool types
+        tool_slots    = layout["tool_slots"]   # list of (flat_idx, tool_type_int)
+        n_tools       = min(len(tool_slots), MAX_TOOLS)
+        tool_pos      = np.zeros((MAX_TOOLS, 2), dtype=np.int32)
+        tool_type_arr = np.full((MAX_TOOLS,), -1, dtype=np.int32)
+        tool_comp_idx = np.full((MAX_TOOLS,), -1, dtype=np.int32)
+        tool_active   = np.zeros((MAX_TOOLS,), dtype=bool)
+        tool_needed_n = np.zeros((MAX_TOOLS,), dtype=np.int32)
+        comp_assigned = [False] * n_comps
+        for i in range(n_tools):
+            fi, tt = tool_slots[i]
+            ty, tx = divmod(int(fi), W)
+            tool_pos[i]      = [tx, ty]
+            tool_type_arr[i] = int(tt)
+            for ci in range(n_comps):
+                if not comp_assigned[ci] and int(comps[ci]["tool_type"]) == int(tt):
+                    comp_assigned[ci] = True
+                    tool_comp_idx[i]  = ci
+                    tool_needed_n[i]  = comps[ci]["n_ingredients"]
+                    tool_active[i]    = True
+                    break
+
+        # Agent spawn positions
+        agent_flat = np.asarray(layout["agent_idx"])
+        spawns     = [(int(fi) % W, int(fi) // W) for fi in agent_flat]
+        n          = self.num_agents
+        if len(spawns) >= n:
+            if self.random_reset:
+                rng_np.shuffle(spawns)
+            chosen = spawns[:n]
+        else:
+            floor_cells = [(x, y) for y in range(H) for x in range(W)
+                           if not wall_map[y, x] and (x, y) not in set(spawns)]
+            rng_np.shuffle(floor_cells)
+            chosen = spawns + floor_cells[:n - len(spawns)]
+        agent_pos     = np.array([[p[0], p[1]] for p in chosen[:n]], dtype=np.int32)
+        agent_dir_idx = np.zeros(self.num_agents, dtype=np.int32)
+        agent_dir     = np.array(DIR_TO_VEC)[agent_dir_idx]
+
+        ri = recipe_idx
+        plate_pos      = np.zeros((MAX_PLATES, 2), dtype=np.int32)
+        plate_on_ctr   = np.zeros((MAX_PLATES,), dtype=bool)
+        plate_exists   = np.zeros((MAX_PLATES,), dtype=bool)
+        plate_contents = np.full((MAX_PLATES, MAX_COMP), -1, dtype=np.int32)
+        plate_n_cont   = np.zeros((MAX_PLATES,), dtype=np.int32)
+        plate_complete = np.zeros((MAX_PLATES,), dtype=bool)
+
+        maze_map = self._build_maze_map(
+            H, W, wall_map, agent_pos, agent_dir_idx,
+            goal_pos[:1],
+            plate_pile_pos,
+            disp_pos, disp_ingr, disp_active,
+            tool_pos, tool_type_arr, tool_active,
+        )
+
+        state = GourmetState(
+            agent_pos         = jnp.array(agent_pos, dtype=jnp.int32),
+            agent_dir         = jnp.array(agent_dir),
+            agent_dir_idx     = jnp.array(agent_dir_idx),
+            agent_inv         = jnp.zeros(self.num_agents, dtype=jnp.int32),
+            agent_plate_idx   = jnp.full((self.num_agents,), -1, dtype=jnp.int32),
+
+            wall_map          = jnp.array(wall_map),
+            maze_map          = jnp.array(maze_map),
+
+            goal_pos          = jnp.array(goal_pos, dtype=jnp.int32),
+
+            disp_pos          = jnp.array(disp_pos, dtype=jnp.int32),
+            disp_ingredient   = jnp.array(disp_ingr),
+            disp_active       = jnp.array(disp_active),
+
+            tool_pos          = jnp.array(tool_pos, dtype=jnp.int32),
+            tool_type         = jnp.array(tool_type_arr),
+            tool_comp_idx     = jnp.array(tool_comp_idx),
+            tool_active       = jnp.array(tool_active),
+            tool_n_contents   = jnp.zeros(MAX_TOOLS, dtype=jnp.int32),
+            tool_needed_n     = jnp.array(tool_needed_n),
+            tool_timer        = jnp.full(MAX_TOOLS, -1, dtype=jnp.int32),
+            tool_done         = jnp.zeros(MAX_TOOLS, dtype=bool),
+
+            plate_pos         = jnp.array(plate_pos, dtype=jnp.int32),
+            plate_on_counter  = jnp.array(plate_on_ctr),
+            plate_exists      = jnp.array(plate_exists),
+            plate_contents    = jnp.array(plate_contents),
+            plate_n_contents  = jnp.array(plate_n_cont),
+            plate_complete    = jnp.array(plate_complete),
+
+            active_recipe_idx  = recipe_idx,
+            recipe_n_comps     = int(self._rec_n_comps[ri]),
+            recipe_comp_tool   = jnp.array(self._rec_comp_tool[ri].copy()),
+            recipe_comp_cook   = jnp.array(self._rec_comp_cook[ri].copy()),
+            recipe_comp_n_ingr = jnp.array(self._rec_comp_n_ingr[ri].copy()),
+            recipe_comp_ingr   = jnp.array(self._rec_comp_ingr[ri].copy()),
+            recipe_comp_ids    = jnp.array(self._rec_comp_ids[ri].copy()),
+
+            time              = 0,
+            terminal          = False,
+        )
+
+        obs = self.get_obs(state)
+        return lax.stop_gradient(obs), lax.stop_gradient(state)
+
     # ────────────────────────────────────────────────────────────────────────
     # Maze-map builder
     # ────────────────────────────────────────────────────────────────────────
@@ -511,7 +664,7 @@ class GourmetOvercooked(MultiAgentEnv):
 
     def _step_agents(self, key, state: GourmetState, action: chex.Array):
         n = self.num_agents
-        H, W = FIXED_H, FIXED_W
+        H, W = self._H, self._W
 
         is_move  = jnp.logical_and(action != Actions.stay, action != Actions.interact)
         is_move_T = jnp.expand_dims(is_move, 0).T
@@ -997,7 +1150,7 @@ class GourmetOvercooked(MultiAgentEnv):
 
     def get_obs(self, state: GourmetState) -> Dict[str, chex.Array]:
         PAD  = self.agent_view_size - 1
-        H, W = FIXED_H, FIXED_W
+        H, W = self._H, self._W
         mm   = state.maze_map[PAD:PAD + H, PAD:PAD + W, :]
         obj  = mm[:, :, 0].astype(jnp.int32)
         meta = mm[:, :, 2].astype(jnp.int32)
