@@ -362,6 +362,13 @@ def main():
         "--list_layouts", action="store_true",
         help="Print all available layout names and exit.",
     )
+    parser.add_argument(
+        "--all_recipes", action="store_true",
+        help="Allow GourmetOvercooked to randomly pick any of the 301 recipes "
+             "each episode. This precomputes 301 cached reset states at startup "
+             "(slow: 1-3 minutes). Default narrows 'all' to a single recipe for "
+             "fast startup.",
+    )
     args = parser.parse_args()
 
     if args.list_layouts:
@@ -380,6 +387,17 @@ def main():
         # Use recipe_ids embedded in the layout unless the user overrode them
         if args.recipe_ids == "all" and "recipe_ids" in layout:
             recipe_ids = layout["recipe_ids"]
+
+    # Narrow recipe_ids="all" to a single recipe for interactive play.
+    # GourmetOvercooked.__init__ eagerly builds one cached reset state (incl.
+    # a full get_obs pass) per allowed recipe, which takes 1-3 minutes for
+    # all 301 recipes on the GPU. The user can opt back in with --all_recipes.
+    if recipe_ids == "all" and not args.all_recipes:
+        recipe_ids = 0
+        print("[interactive] Narrowing recipe_ids='all' → recipe 0 for fast "
+              "startup. Pass --recipe_ids <id> for a specific recipe, "
+              "--recipe_ids 0,1,2 for a small set, or --all_recipes to keep "
+              "the full 301-recipe pool (1-3 min startup).")
 
     session = InteractiveGourmetOvercooked(
         recipe_ids       = recipe_ids,
