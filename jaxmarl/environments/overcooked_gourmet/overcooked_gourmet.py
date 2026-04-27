@@ -1,21 +1,24 @@
 """
 env.py — GourmetOvercooked JAX Environment
 ==========================================
-A generalised, recipe-driven extension of Overcooked supporting:
+A recipe-driven Overcooked supporting:
 
   • 301 MealDB recipes (538 ingredients, 51 tool types)
   • Multi-ingredient cooking stations (add ingredients → cook → plate)
   • Multi-component plate assembly (collect outputs from multiple tools)
-  • Selectable target recipe(s) via `recipe_ids` argument
+
+Layouts must be specified explicitly. The set of allowed recipes for an
+environment comes from `layout["recipe_ids"]` (set in the layout file via
+the `RECIPES` module-level variable). Every layout must pin at least one
+recipe — `RECIPES = "all"` is no longer supported.
 
 Usage
 -----
-    from jaxmarl import make
-    env = make("overcooked_gourmet", recipe_ids=[5, 42])
-
-    # or directly:
+    from jaxmarl.environments.overcooked_gourmet.custom_layouts.layout_builder import load
     from jaxmarl.environments.overcooked_gourmet import GourmetOvercooked
-    env = GourmetOvercooked(recipe_ids=[5, 42])
+
+    layout = load("cramped_room", seed=0, num_agents=2)
+    env    = GourmetOvercooked(layout=layout, num_agents=2)
 """
 
 import os
@@ -33,8 +36,6 @@ from flax import struct
 from jaxmarl.environments import MultiAgentEnv, spaces
 
 from .common import (
-    # grid dimensions
-    FIXED_H, FIXED_W,
     # object type constants
     OBJ_EMPTY, OBJ_WALL, OBJ_GOAL, OBJ_PLATE_PILE, OBJ_AGENT,
     OBJ_DISPENSER, OBJ_CUTTING_BOARD,
@@ -129,17 +130,46 @@ class GourmetOvercooked(MultiAgentEnv):
 
     def __init__(
         self,
-        recipe_ids: Union[List[int], int, str] = "all",
+        layout,
         num_agents: int = 2,
         max_steps:  int = 500,
         random_reset: bool = False,
         instantaneous_cook: bool = False,
         expanded_actions: bool = False,
         recipe_db_path: Optional[str] = None,
-        layout_seed: int = 0,
-        layout=None,
     ):
+        """
+        Initialise GourmetOvercooked from a pre-built layout FrozenDict.
+
+        Parameters
+        ----------
+        layout : FrozenDict
+            A gourmet layout produced by
+            `custom_layouts.layout_builder.load(name, seed, num_agents)` or
+            `.build(GRID, ITEMS, recipes=...)`. Must contain
+            `height`, `width`, `wall_idx`, `agent_idx`, `goal_idx`,
+            `plate_pile_idx`, `dispenser_slots`, `tool_slots`, and
+            `recipe_ids` (an int or list[int]; `"all"` is rejected).
+        num_agents, max_steps, random_reset, instantaneous_cook,
+        expanded_actions, recipe_db_path : standard env knobs.
+        """
         super().__init__(num_agents=num_agents)
+
+        if layout is None:
+            raise ValueError(
+                "GourmetOvercooked requires a `layout` FrozenDict. Build one "
+                "with custom_layouts.layout_builder.load(name, seed, num_agents) "
+                "and pass it via layout=..."
+            )
+        for required_key in ("height", "width", "wall_idx", "agent_idx",
+                             "goal_idx", "plate_pile_idx", "dispenser_slots",
+                             "tool_slots", "recipe_ids"):
+            if required_key not in layout:
+                raise ValueError(
+                    f"Layout is missing required field {required_key!r}. "
+                    "All gourmet layouts must define RECIPES at module level "
+                    "and use gourmet item types (dispenser, pot, …)."
+                )
 
         db_path = _find_db(recipe_db_path)
         with open(db_path) as f:
@@ -150,14 +180,31 @@ class GourmetOvercooked(MultiAgentEnv):
         self.N_INGR         = self._db_constants["N_INGREDIENTS"]
         self.INV_PLATE      = self.N_INGR + 1
 
-        if recipe_ids == "all":
-            self._allowed = list(range(len(self._all_recipes)))
-        elif isinstance(recipe_ids, int):
-            self._allowed = [recipe_ids]
+        # Resolve allowed recipes from the layout's RECIPES field.
+        layout_recipe_ids = layout["recipe_ids"]
+        if isinstance(layout_recipe_ids, str):
+            raise ValueError(
+                "layout['recipe_ids'] cannot be a string (e.g. 'all'). Pin a "
+                "specific recipe id or list of ids in the layout file's "
+                "RECIPES module-level variable."
+            )
+        if hasattr(layout_recipe_ids, "tolist"):
+            layout_recipe_ids = layout_recipe_ids.tolist()
+        if isinstance(layout_recipe_ids, int):
+            self._allowed = [int(layout_recipe_ids)]
+        elif isinstance(layout_recipe_ids, (list, tuple)):
+            self._allowed = [int(r) for r in layout_recipe_ids
+                             if int(r) < len(self._all_recipes)]
         else:
-            self._allowed = [r for r in recipe_ids if r < len(self._all_recipes)]
+            raise ValueError(
+                f"layout['recipe_ids'] must be an int or list[int]; "
+                f"got {type(layout_recipe_ids).__name__}: {layout_recipe_ids!r}"
+            )
         if not self._allowed:
-            raise ValueError("No valid recipe IDs provided.")
+            raise ValueError(
+                "Layout pins no valid recipe IDs. Set RECIPES = <int> or "
+                "RECIPES = [<int>, …] in the layout file."
+            )
 
         self._compile_recipe_arrays()
 
@@ -166,7 +213,6 @@ class GourmetOvercooked(MultiAgentEnv):
         self.instantaneous_cook = instantaneous_cook
         self.expanded_actions   = expanded_actions
         self.agent_view_size    = 5
-        self._layout_seed       = layout_seed
         self._layout            = layout
 
         self._max_cook_time = float(max(TOOL_COOK_TIMES.tolist()))
@@ -178,12 +224,8 @@ class GourmetOvercooked(MultiAgentEnv):
         else:
             self.action_set = jnp.array(base_actions + [Actions.interact])
 
-        if layout is not None:
-            self._H = int(layout["height"])
-            self._W = int(layout["width"])
-        else:
-            self._H = FIXED_H
-            self._W = FIXED_W
+        self._H = int(layout["height"])
+        self._W = int(layout["width"])
 
         n_grid_ch   = self._n_grid_channels()
         n_flat      = MAX_COMP * 3 + 3
@@ -203,7 +245,7 @@ class GourmetOvercooked(MultiAgentEnv):
         self._cached_resets: list = []
         dummy_key = jax.random.PRNGKey(0)
         for rid in self._allowed:
-            obs, st = self._reset_for_recipe(dummy_key, rid, self._layout_seed)
+            obs, st = self._reset_for_recipe(dummy_key, rid)
             self._cached_resets.append((obs, st))
 
     # ────────────────────────────────────────────────────────────────────────
@@ -263,178 +305,54 @@ class GourmetOvercooked(MultiAgentEnv):
         pick = jax.random.randint(rk, (), 0, len(self._cached_resets))
         return jax.lax.switch(pick, [lambda r=r: r for r in self._cached_resets])
 
-    def rebuild_layouts(self, layout_seed: int) -> None:
+    def rebuild_layouts(self, layout) -> None:
         """
-        Rebuild cached reset states with a new layout seed.
+        Replace the current layout with a new pre-built FrozenDict.
 
-        Call this between training updates to randomize tool and dispenser
-        positions.  After calling this, recreate any jax.jit-compiled functions
-        that close over env.reset or env.step so they pick up the new layouts.
+        Call this between training updates to swap the kitchen layout (e.g.
+        when randomising layout seeds across training chunks). The new
+        layout's recipe_ids must be a subset of the original layout's
+        recipe_ids — otherwise the shape constants baked in at __init__
+        will not match. After calling this, recreate any jax.jit-compiled
+        functions that close over env.reset / env.step so they pick up
+        the new cached resets.
         """
-        self._layout_seed = layout_seed
+        if layout is None:
+            raise ValueError("rebuild_layouts requires a non-None layout.")
+        new_recipe_ids = layout.get("recipe_ids")
+        if hasattr(new_recipe_ids, "tolist"):
+            new_recipe_ids = new_recipe_ids.tolist()
+        if isinstance(new_recipe_ids, int):
+            new_allowed = [int(new_recipe_ids)]
+        elif isinstance(new_recipe_ids, (list, tuple)):
+            new_allowed = [int(r) for r in new_recipe_ids]
+        else:
+            raise ValueError(
+                f"layout['recipe_ids'] must be an int or list[int]; "
+                f"got {type(new_recipe_ids).__name__}: {new_recipe_ids!r}"
+            )
+        if set(new_allowed) != set(self._allowed):
+            raise ValueError(
+                "rebuild_layouts: new layout has a different recipe set "
+                f"({sorted(new_allowed)}) than the original env "
+                f"({sorted(self._allowed)}). Build a fresh GourmetOvercooked "
+                "instead when changing recipes."
+            )
+        self._layout = layout
+        self._H = int(layout["height"])
+        self._W = int(layout["width"])
         dummy_key = jax.random.PRNGKey(0)
         self._cached_resets = []
         for rid in self._allowed:
-            obs, st = self._reset_for_recipe(dummy_key, rid, layout_seed)
+            obs, st = self._reset_for_recipe(dummy_key, rid)
             self._cached_resets.append((obs, st))
 
-    def _reset_for_recipe(self, key, recipe_idx: int, layout_seed: int = 0):
-        # Per-recipe RNG: different recipes get independent shuffles for the same seed.
-        rng_np = np.random.RandomState((layout_seed, recipe_idx))
-
-        if self._layout is not None:
-            return self._reset_from_layout(key, recipe_idx, rng_np)
-
-        H, W = self._H, self._W
-        recipe = self._all_recipes[recipe_idx]
-        unique_ingrs = self._rec_unique_ingrs[recipe_idx]
-        n_comps  = self._rec_n_comps[recipe_idx]
-        comps    = recipe["components"][:MAX_COMP]
-
-        grid = np.ones((H, W), dtype=np.int32)
-        grid[2:4, 1:W-1] = 0
-
-        n_disp  = min(len(unique_ingrs), MAX_DISP, W - 3)
-        n_tools = min(n_comps, MAX_TOOLS, W - 2)
-        top_y   = 1
-        bot_y   = 4
-
-        # --- Randomised placement using layout_seed ---
-        # Top row: assign n_disp dispensers + plate pile + goal to random columns
-        all_cols  = list(range(1, W - 1))
-        n_top     = n_disp + 2
-        top_cols  = rng_np.choice(all_cols, size=n_top, replace=False).tolist()
-        rng_np.shuffle(top_cols)          # randomise which item occupies which column
-        disp_xs   = top_cols[:n_disp]
-        pp_x      = top_cols[n_disp]
-        goal_x    = top_cols[n_disp + 1]
-
-        # Shuffle which ingredient sits in which dispenser slot
-        ingr_ids = list(unique_ingrs[:n_disp])
-        rng_np.shuffle(ingr_ids)
-
-        # Bottom row: pick n_tools random columns; shuffle which component/tool goes where
-        bot_cols   = rng_np.choice(all_cols, size=n_tools, replace=False).tolist()
-        comp_order = list(range(min(n_comps, n_tools)))
-        rng_np.shuffle(comp_order)
-        tool_xs        = bot_cols
-        shuffled_comps = [comps[ci] for ci in comp_order]
-
-        wall_map = grid.astype(bool)
-
-        goal_pos = np.zeros((MAX_GOALS, 2), dtype=np.int32)
-        goal_pos[0] = [goal_x, top_y]
-
-        plate_pile_pos = np.array([pp_x, top_y], dtype=np.int32)
-
-        disp_pos       = np.zeros((MAX_DISP, 2), dtype=np.int32)
-        disp_ingr      = np.full((MAX_DISP,), -1, dtype=np.int32)
-        disp_active    = np.zeros((MAX_DISP,), dtype=bool)
-        for i, (xi, ingr_id) in enumerate(zip(disp_xs, ingr_ids)):
-            disp_pos[i]    = [xi, top_y]
-            disp_ingr[i]   = ingr_id
-            disp_active[i] = True
-
-        tool_pos       = np.zeros((MAX_TOOLS, 2), dtype=np.int32)
-        tool_type_arr  = np.full((MAX_TOOLS,), -1, dtype=np.int32)
-        tool_comp_idx  = np.full((MAX_TOOLS,), -1, dtype=np.int32)
-        tool_active    = np.zeros((MAX_TOOLS,), dtype=bool)
-        tool_needed_n  = np.zeros((MAX_TOOLS,), dtype=np.int32)
-        for i, (xi, comp) in enumerate(zip(tool_xs, shuffled_comps)):
-            tool_pos[i]      = [xi, bot_y]
-            tool_type_arr[i] = comp["tool_type"]
-            tool_comp_idx[i] = comp_order[i]   # which recipe component this slot handles
-            tool_active[i]   = True
-            tool_needed_n[i] = comp["n_ingredients"]
-
-        key, rk = jax.random.split(key)
-        free = [(x, y) for y in [2, 3] for x in range(1, W - 1)]
-
-        if self.random_reset:
-            idxs = jax.random.choice(rk, len(free), shape=(self.num_agents,), replace=False)
-            agent_pos = np.array([[free[int(i)][0], free[int(i)][1]]
-                                   for i in idxs], dtype=np.int32)
-        else:
-            n = self.num_agents
-            if n == 1:
-                chosen = [free[len(free) // 2]]
-            else:
-                step = (len(free) - 1) / (n - 1)
-                chosen = [free[int(round(i * step))] for i in range(n)]
-            agent_pos = np.array([[p[0], p[1]] for p in chosen], dtype=np.int32)
-
-        agent_dir_idx = np.zeros(self.num_agents, dtype=np.int32)
-        agent_dir     = np.array(DIR_TO_VEC)[agent_dir_idx]
-
-        ri = recipe_idx
-        r_n_comps    = int(self._rec_n_comps[ri])
-        r_comp_tool  = self._rec_comp_tool[ri].copy()
-        r_comp_cook  = self._rec_comp_cook[ri].copy()
-        r_comp_n_ingr= self._rec_comp_n_ingr[ri].copy()
-        r_comp_ingr  = self._rec_comp_ingr[ri].copy()
-        r_comp_ids   = self._rec_comp_ids[ri].copy()
-
-        plate_pos      = np.zeros((MAX_PLATES, 2), dtype=np.int32)
-        plate_on_ctr   = np.zeros((MAX_PLATES,), dtype=bool)
-        plate_exists   = np.zeros((MAX_PLATES,), dtype=bool)
-        plate_contents = np.full((MAX_PLATES, MAX_COMP), -1, dtype=np.int32)
-        plate_n_cont   = np.zeros((MAX_PLATES,), dtype=np.int32)
-        plate_complete = np.zeros((MAX_PLATES,), dtype=bool)
-
-        maze_map = self._build_maze_map(
-            H, W, wall_map, agent_pos, agent_dir_idx,
-            goal_pos[:1],
-            plate_pile_pos,
-            disp_pos, disp_ingr, disp_active,
-            tool_pos, tool_type_arr, tool_active,
-        )
-
-        state = GourmetState(
-            agent_pos         = jnp.array(agent_pos, dtype=jnp.int32),
-            agent_dir         = jnp.array(agent_dir),
-            agent_dir_idx     = jnp.array(agent_dir_idx),
-            agent_inv         = jnp.zeros(self.num_agents, dtype=jnp.int32),
-            agent_plate_idx   = jnp.full((self.num_agents,), -1, dtype=jnp.int32),
-
-            wall_map          = jnp.array(wall_map),
-            maze_map          = jnp.array(maze_map),
-
-            goal_pos          = jnp.array(goal_pos, dtype=jnp.int32),
-
-            disp_pos          = jnp.array(disp_pos, dtype=jnp.int32),
-            disp_ingredient   = jnp.array(disp_ingr),
-            disp_active       = jnp.array(disp_active),
-
-            tool_pos          = jnp.array(tool_pos, dtype=jnp.int32),
-            tool_type         = jnp.array(tool_type_arr),
-            tool_comp_idx     = jnp.array(tool_comp_idx),
-            tool_active       = jnp.array(tool_active),
-            tool_n_contents   = jnp.zeros(MAX_TOOLS, dtype=jnp.int32),
-            tool_needed_n     = jnp.array(tool_needed_n),
-            tool_timer        = jnp.full(MAX_TOOLS, -1, dtype=jnp.int32),
-            tool_done         = jnp.zeros(MAX_TOOLS, dtype=bool),
-
-            plate_pos         = jnp.array(plate_pos, dtype=jnp.int32),
-            plate_on_counter  = jnp.array(plate_on_ctr),
-            plate_exists      = jnp.array(plate_exists),
-            plate_contents    = jnp.array(plate_contents),
-            plate_n_contents  = jnp.array(plate_n_cont),
-            plate_complete    = jnp.array(plate_complete),
-
-            active_recipe_idx  = recipe_idx,
-            recipe_n_comps     = r_n_comps,
-            recipe_comp_tool   = jnp.array(r_comp_tool),
-            recipe_comp_cook   = jnp.array(r_comp_cook),
-            recipe_comp_n_ingr = jnp.array(r_comp_n_ingr),
-            recipe_comp_ingr   = jnp.array(r_comp_ingr),
-            recipe_comp_ids    = jnp.array(r_comp_ids),
-
-            time              = 0,
-            terminal          = False,
-        )
-
-        obs = self.get_obs(state)
-        return lax.stop_gradient(obs), lax.stop_gradient(state)
+    def _reset_for_recipe(self, key, recipe_idx: int):
+        # Per-recipe RNG: different recipes get independent shuffles. The
+        # placement seed is baked into the layout at build time; here we only
+        # use the rng for the recipe-specific dispenser-ingredient assignment.
+        rng_np = np.random.RandomState((0, recipe_idx))
+        return self._reset_from_layout(key, recipe_idx, rng_np)
 
     def _reset_from_layout(self, key, recipe_idx: int, rng_np):
         """Build initial state from a pre-built FrozenDict layout (custom grid)."""

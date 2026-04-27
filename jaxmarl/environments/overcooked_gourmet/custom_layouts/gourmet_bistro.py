@@ -1,11 +1,9 @@
 """
 Gourmet Bistro — 10×6 kitchen for GourmetOvercooked.
-Three ingredient dispensers, two tool stations (cutting board + pan),
-one plate pile, two delivery goals.
+Open room with a central island counter; multi-tool gourmet station with
+ingredient dispensers, a pot, a cutting board, plate pile, and two goals.
 
-Usage:
-    layout = load("gourmet_bistro", seed=3)
-    env = GourmetOvercooked(recipe_ids=layout["recipe_ids"], ...)
+Recipe: Tomato Onion Soup (id=301) — 2 ingredients (tomato + onion), pot, cook_time=20.
 """
 
 GRID = """
@@ -19,14 +17,10 @@ WWWWWWWWWW
 
 ITEMS = [
     {"type": "dispenser",     "count": 3},
+    {"type": "pot",           "count": 1},
     {"type": "cutting_board", "count": 1},
-    {"type": "pan",           "count": 1},
     {"type": "plate_pile",    "count": 1},
     {"type": "goal",          "count": 2},
 ]
 
-# Which recipes earn reward in this environment.
-# "all"       → any recipe in the DB
-# [5, 42]     → only recipe IDs 5 and 42
-# 5           → only recipe 5
-RECIPES = "all"
+RECIPES = 301

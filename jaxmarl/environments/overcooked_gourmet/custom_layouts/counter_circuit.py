@@ -19,4 +19,4 @@ ITEMS = [
     {"type": "goal",          "count": 1},
 ]
 
-RECIPES = "all"
+RECIPES = 301

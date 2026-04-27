@@ -3,12 +3,13 @@ interactive.py — Matplotlib-based interactive player for GourmetOvercooked.
 
 Usage
 -----
-    python -m jaxmarl.environments.overcooked_gourmet.interactive
-    python -m jaxmarl.environments.overcooked_gourmet.interactive --recipe_ids 5
-    python -m jaxmarl.environments.overcooked_gourmet.interactive --num_agents 3
     python -m jaxmarl.environments.overcooked_gourmet.interactive --layout cramped_room
-    python -m jaxmarl.environments.overcooked_gourmet.interactive --layout chicken_alfredo
+    python -m jaxmarl.environments.overcooked_gourmet.interactive --layout chicken_alfredo --num_agents 2
     python -m jaxmarl.environments.overcooked_gourmet.interactive --list_layouts
+
+`--layout` is required: the layout file specifies the kitchen geometry, item
+placement, and the recipe(s) (via the file's RECIPES variable). No CLI flag
+exists to pick recipes — they always come from the layout file.
 
 Controls
 --------
@@ -145,32 +146,19 @@ def _render(state, num_agents: int, step: int, total_reward: float,
 class InteractiveGourmetOvercooked:
     """Matplotlib-event-driven interactive session."""
 
-    def __init__(self, recipe_ids, num_agents: int = 2,
-                 seed: int = 0, controlled_agent: int = 0,
-                 layout=None):
-        if layout is not None:
-            self.env = GourmetOvercooked(
-                recipe_ids=recipe_ids,
-                num_agents=num_agents,
-                layout=layout,
-            )
-        else:
-            self.env = GourmetOvercooked(
-                recipe_ids=recipe_ids,
-                num_agents=num_agents,
-            )
+    def __init__(self, layout, num_agents: int = 2,
+                 seed: int = 0, controlled_agent: int = 0):
+        self.env = GourmetOvercooked(
+            layout=layout,
+            num_agents=num_agents,
+        )
 
         self.num_agents  = num_agents
         self.ctrl        = controlled_agent
-        self.recipe_ids  = recipe_ids
         self._rng        = jax.random.PRNGKey(seed)
 
         # Run env.reset / env.step EAGERLY — interactive play is human-paced
-        # (1 step per keypress) and JITting reset over a layout with
-        # recipe_ids="all" traces all 301 cached reset states, which causes
-        # multi-minute compile times and CUDA-graph OOM on commodity GPUs.
-        # Eager evaluation runs each call in tens of milliseconds and uses no
-        # extra GPU memory.
+        # (1 step per keypress); JIT compile cost would dwarf step latency.
         self._reset_fn = self.env.reset
         self._step_fn  = self.env.step
 
@@ -184,13 +172,13 @@ class InteractiveGourmetOvercooked:
         self.state        = None
         self.obs          = None
 
-        # Recipe label for the title bar
-        if recipe_ids == "all":
-            self.recipe_label = "all recipes"
-        elif isinstance(recipe_ids, int):
-            self.recipe_label = f"recipe {recipe_ids}"
+        # Recipe label for the title bar — read from the env's resolved
+        # allowed-recipe list (which came from layout["recipe_ids"]).
+        rids = self.env._allowed
+        if len(rids) == 1:
+            self.recipe_label = f"recipe {rids[0]}"
         else:
-            self.recipe_label = "recipes " + ",".join(map(str, recipe_ids))
+            self.recipe_label = "recipes " + ",".join(str(r) for r in rids)
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -264,51 +252,6 @@ class InteractiveGourmetOvercooked:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def _parse_recipe_ids(s: str):
-    if s.lower() == "all":
-        return "all"
-    parts = [int(x.strip()) for x in s.split(",")]
-    return parts[0] if len(parts) == 1 else parts
-
-
-def _find_compatible_recipe(layout) -> int | None:
-    """Pick a recipe whose ingredients fit the layout's dispenser count
-    and whose component tool_types are all available in the layout's tool slots.
-
-    Returns a recipe_id, or None if no recipe in the DB is compatible.
-    """
-    import json
-    import os as _os
-    # Load the recipe DB by walking up from this file.
-    here = _os.path.dirname(_os.path.abspath(__file__))
-    db = None
-    for _ in range(10):
-        candidate = _os.path.join(here, "data", "gourmet_recipe_db.json")
-        if _os.path.isfile(candidate):
-            with open(candidate) as fh:
-                db = json.load(fh)
-            break
-        here = _os.path.dirname(here)
-    if db is None:
-        return None
-
-    n_disp = int(len(layout.get("dispenser_slots", [])))
-    layout_tool_types = set(int(tt) for _, tt in layout.get("tool_slots", []))
-
-    for recipe in db["recipes"]:
-        unique_ingrs = set()
-        for c in recipe["components"]:
-            for ing in c["ingredients"]:
-                unique_ingrs.add(ing["ingredient_id"])
-        if len(unique_ingrs) > n_disp:
-            continue
-        recipe_tools = set(int(c["tool_type"]) for c in recipe["components"])
-        if not recipe_tools.issubset(layout_tool_types):
-            continue
-        return int(recipe["id"])
-    return None
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Interactive GourmetOvercooked player",
@@ -316,31 +259,20 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--recipe_ids", type=str, default="all",
-        help="'all', a single int, or comma-separated ints (e.g. '5,42'). "
-             "Ignored when --layout supplies recipe_ids.",
+        "--layout", type=str, default=None,
+        help="Named custom layout to use (e.g. cramped_room, chicken_alfredo). "
+             "REQUIRED unless --list_layouts is set. Run with --list_layouts to "
+             "see all available names.",
+    )
+    parser.add_argument(
+        "--list_layouts", action="store_true",
+        help="Print all available layout names and exit.",
     )
     parser.add_argument("--num_agents", type=int, default=2)
     parser.add_argument("--seed",       type=int, default=0)
     parser.add_argument(
         "--agent", type=int, default=0,
         help="Which agent index the keyboard controls (others hold still).",
-    )
-    parser.add_argument(
-        "--layout", type=str, default=None,
-        help="Named custom layout to use (e.g. cramped_room, chicken_alfredo). "
-             "Run with --list_layouts to see all available names.",
-    )
-    parser.add_argument(
-        "--list_layouts", action="store_true",
-        help="Print all available layout names and exit.",
-    )
-    parser.add_argument(
-        "--all_recipes", action="store_true",
-        help="Allow GourmetOvercooked to randomly pick any of the 301 recipes "
-             "each episode. This precomputes 301 cached reset states at startup "
-             "(slow: 1-3 minutes). Default narrows 'all' to a single recipe for "
-             "fast startup.",
     )
     args = parser.parse_args()
 
@@ -351,55 +283,19 @@ def main():
             print(f"  {name}")
         sys.exit(0)
 
-    layout     = None
-    recipe_ids = _parse_recipe_ids(args.recipe_ids)
-    user_set_recipes = (args.recipe_ids != "all")
+    if args.layout is None:
+        parser.error(
+            "--layout is required. Run with --list_layouts to see available names."
+        )
 
-    if args.layout is not None:
-        from jaxmarl.environments.overcooked_gourmet.custom_layouts import load
-        layout = load(args.layout, seed=args.seed, num_agents=args.num_agents)
-        # Use recipe_ids embedded in the layout unless the user overrode them
-        if args.recipe_ids == "all" and "recipe_ids" in layout:
-            recipe_ids = layout["recipe_ids"]
-
-    # When --layout is given and the user did NOT pin a specific recipe, pick a
-    # recipe whose ingredient count fits the layout's dispenser slot count and
-    # whose required tool types are all present in the layout's tool slots.
-    # Otherwise the agent literally cannot deliver the recipe (e.g. recipe 0
-    # is "Apple Frangipan Tart" — 8 unique ingredients across 6 different
-    # tool types, totally incompatible with cramped_room's 2 dispensers + pot
-    # + cutting_board).
-    if args.layout is not None and not user_set_recipes:
-        compat = _find_compatible_recipe(layout)
-        if compat is not None:
-            recipe_ids = compat
-            print(f"[interactive] Auto-picked compatible recipe {compat} for "
-                  f"layout '{args.layout}'. Pass --recipe_ids <id> to override.")
-        else:
-            print(f"[interactive] WARNING: no recipe in the DB is fully "
-                  f"compatible with layout '{args.layout}' (n_dispensers="
-                  f"{len(layout.get('dispenser_slots', []))}, tools="
-                  f"{sorted(set(int(tt) for _, tt in layout.get('tool_slots', [])))}). "
-                  f"Falling back to recipe 0 — the agent may be unable to deliver.")
-            recipe_ids = 0
-
-    # Narrow recipe_ids="all" to a single recipe for interactive play.
-    # GourmetOvercooked.__init__ eagerly builds one cached reset state (incl.
-    # a full get_obs pass) per allowed recipe, which takes 1-3 minutes for
-    # all 301 recipes on the GPU. The user can opt back in with --all_recipes.
-    if recipe_ids == "all" and not args.all_recipes:
-        recipe_ids = 0
-        print("[interactive] Narrowing recipe_ids='all' → recipe 0 for fast "
-              "startup. Pass --recipe_ids <id> for a specific recipe, "
-              "--recipe_ids 0,1,2 for a small set, or --all_recipes to keep "
-              "the full 301-recipe pool (1-3 min startup).")
+    from jaxmarl.environments.overcooked_gourmet.custom_layouts import load
+    layout = load(args.layout, seed=args.seed, num_agents=args.num_agents)
 
     session = InteractiveGourmetOvercooked(
-        recipe_ids       = recipe_ids,
+        layout           = layout,
         num_agents       = args.num_agents,
         seed             = args.seed,
         controlled_agent = args.agent,
-        layout           = layout,
     )
     session.run()
 

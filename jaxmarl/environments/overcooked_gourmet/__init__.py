@@ -3,19 +3,17 @@ overcooked_gourmet — Recipe-driven multi-agent Overcooked environment for JaxM
 
 Usage
 -----
-    from jaxmarl import make
-    env = make("overcooked_gourmet", recipe_ids=[5, 42])
-
-    # or directly:
+    from jaxmarl.environments.overcooked_gourmet.custom_layouts.layout_builder import load
     from jaxmarl.environments.overcooked_gourmet import GourmetOvercooked
-    env = GourmetOvercooked(recipe_ids=[5, 42])
+
+    layout = load("cramped_room", seed=0, num_agents=2)
+    env    = GourmetOvercooked(layout=layout, num_agents=2)
     obs, state = env.reset(jax.random.PRNGKey(0))
 """
 
 from .overcooked_gourmet import GourmetOvercooked, Actions, _check_plate_complete
 from .common import (
     GourmetState,
-    FIXED_H, FIXED_W,
     OBJ_EMPTY, OBJ_WALL, OBJ_GOAL, OBJ_PLATE_PILE, OBJ_AGENT,
     OBJ_DISPENSER, OBJ_CUTTING_BOARD, OBJ_PLATE_ON_CTR, OBJ_RAW_ON_CTR,
     N_OBJ_TYPES, N_TOOL_TYPES, TOOL_NAMES, TOOL_COOK_TIMES, TOOL_TYPE_TO_OBJ,

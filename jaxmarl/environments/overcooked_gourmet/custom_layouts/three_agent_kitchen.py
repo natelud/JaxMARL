@@ -1,6 +1,8 @@
 """
 Three-Agent Kitchen — wide 11×5 kitchen designed for 3 agents.
-One agent fetches onions, one cooks, one plates and delivers.
+One agent fetches ingredients, one cooks, one plates and delivers.
+
+Recipe: Tomato Onion Soup (id=301) — 2 ingredients (tomato + onion), pot, cook_time=20.
 """
 
 GRID = """
@@ -12,8 +14,10 @@ WWWWWWWWWWW
 """.strip()
 
 ITEMS = [
-    {"type": "onion_pile",  "count": 3},
-    {"type": "pot",         "count": 2},
-    {"type": "plate_pile",  "count": 2},
-    {"type": "goal",        "count": 2},
+    {"type": "dispenser",  "count": 3},
+    {"type": "pot",        "count": 2},
+    {"type": "plate_pile", "count": 2},
+    {"type": "goal",       "count": 2},
 ]
+
+RECIPES = 301
