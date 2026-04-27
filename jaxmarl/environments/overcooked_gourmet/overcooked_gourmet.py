@@ -637,8 +637,14 @@ class GourmetOvercooked(MultiAgentEnv):
             if not disp_active[i]:
                 continue
             dx, dy = int(disp_pos[i, 0]), int(disp_pos[i, 1])
-            ingr_id = int(disp_ingr[i]) & 0xFF
-            _set(dy, dx, OBJ_DISPENSER, 3, ingr_id)
+            # Store the dispenser SLOT INDEX in the meta byte (not the
+            # ingredient_id). Ingredient IDs in the gourmet DB go up to ~537,
+            # so storing them in a single byte truncates IDs >= 256 (e.g.
+            # tomato=491 -> 235), which then never matches the recipe's
+            # ingredient list and the agent silently fails to add to a tool.
+            # Pickups now look up the real ingredient via state.disp_ingredient
+            # using this slot index.
+            _set(dy, dx, OBJ_DISPENSER, 3, i)
 
         for a in range(self.num_agents):
             ax, ay = int(agent_pos[a, 0]), int(agent_pos[a, 1])
@@ -1062,10 +1068,15 @@ class GourmetOvercooked(MultiAgentEnv):
         return state, r, s
 
     def _case_pickup_dispenser(self, state, agent_idx, is_dispenser, holding_nothing, ingr_meta):
+        # `ingr_meta` is the dispenser SLOT INDEX (see _build_maze_map). Look
+        # up the real ingredient ID from state.disp_ingredient — this is what
+        # lets the gourmet env support ingredient IDs >= 256 (tomato = 491
+        # would otherwise round-trip to 235 via the 1-byte meta channel).
         can = is_dispenser & holding_nothing
 
         def _do(st):
-            ingr_id = ingr_meta.astype(jnp.int32)
+            slot    = jnp.clip(ingr_meta.astype(jnp.int32), 0, MAX_DISP - 1)
+            ingr_id = st.disp_ingredient[slot]
             new_inv = st.agent_inv.at[agent_idx].set(ingr_id + 1)
             return st.replace(agent_inv=new_inv), 0.0, 0.0
 
@@ -1083,8 +1094,14 @@ class GourmetOvercooked(MultiAgentEnv):
         can_drop = is_table & is_empty_counter & (holding_raw | holding_plate)
 
         def _do_raw(st):
-            ingr_id = (inv - 1).astype(jnp.uint8)
-            new_cell = jnp.array([OBJ_RAW_ON_CTR, 4, ingr_id], dtype=jnp.uint8)
+            # 16-bit ingredient ID: high byte in channel 1 (where the env
+            # otherwise stores a "color" tag we don't need for raw items),
+            # low byte in channel 2. Lets us round-trip ingredient IDs >= 256
+            # (e.g. tomato=491) without truncation.
+            ingr_id_full = (inv - 1).astype(jnp.int32)
+            high = ((ingr_id_full // 256) & 0xFF).astype(jnp.uint8)
+            low  = (ingr_id_full & 0xFF).astype(jnp.uint8)
+            new_cell = jnp.array([OBJ_RAW_ON_CTR, high, low], dtype=jnp.uint8)
             new_mm   = st.maze_map.at[PAD + fwd_y, PAD + fwd_x, :].set(new_cell)
             new_inv  = st.agent_inv.at[agent_idx].set(INV_EMPTY)
             return st.replace(maze_map=new_mm, agent_inv=new_inv), 0.0, 0.0
@@ -1150,7 +1167,12 @@ class GourmetOvercooked(MultiAgentEnv):
         can = is_raw_on_ctr & holding_nothing
 
         def _do(st):
-            ingr_id  = ingr_meta.astype(jnp.int32)
+            # Raw-on-counter stores ingredient_id as 16 bits across channels 1
+            # (high) and 2 (low). Reassemble both bytes so IDs >= 256 (e.g.
+            # tomato = 491) survive a drop-then-pickup round trip.
+            high     = st.maze_map[PAD + fwd_y, PAD + fwd_x, 1].astype(jnp.int32)
+            low      = ingr_meta.astype(jnp.int32) & 0xFF
+            ingr_id  = (high << 8) | low
             new_inv  = st.agent_inv.at[agent_idx].set(ingr_id + 1)
             wall_cell = jnp.array([OBJ_WALL, 5, 0], dtype=jnp.uint8)
             new_mm   = st.maze_map.at[PAD + fwd_y, PAD + fwd_x, :].set(wall_cell)
@@ -1176,8 +1198,14 @@ class GourmetOvercooked(MultiAgentEnv):
         pp_l    = (obj == OBJ_PLATE_PILE).astype(jnp.float32)
         disp_l  = (obj == OBJ_DISPENSER).astype(jnp.float32)
 
+        # meta now stores the dispenser slot index (not the ingredient byte) —
+        # look up the real ingredient_id from state.disp_ingredient. This is
+        # what makes ingredient IDs >= 256 work end-to-end.
+        disp_slot = jnp.clip(meta, 0, MAX_DISP - 1)
+        disp_real_ingr = state.disp_ingredient[disp_slot]                     # (H, W)
         disp_ingr_l = jnp.where(disp_l.astype(bool),
-                                  meta.astype(jnp.float32) / jnp.maximum(self.N_INGR, 1),
+                                  disp_real_ingr.astype(jnp.float32)
+                                  / jnp.maximum(self.N_INGR, 1),
                                   0.0)
 
         recipe_all_ingrs = state.recipe_comp_ingr.ravel()
@@ -1185,7 +1213,7 @@ class GourmetOvercooked(MultiAgentEnv):
             disp_l.astype(bool),
             jax.vmap(jax.vmap(
                 lambda m: jnp.any(recipe_all_ingrs == m.astype(jnp.int32))
-            ))(meta).astype(jnp.float32),
+            ))(disp_real_ingr).astype(jnp.float32),
             0.0,
         )
 

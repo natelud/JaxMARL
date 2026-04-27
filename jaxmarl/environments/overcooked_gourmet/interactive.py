@@ -102,6 +102,11 @@ from jaxmarl.viz.overcooked_gourmet_visualizer import (
 )
 
 
+# Higher-resolution tiles for interactive play (eval-video pipeline keeps the
+# default 32 px). 64 px / cell gives sharper sprites and legible numeric
+# labels at typical window sizes.
+_INTERACTIVE_TILE_PX = 64
+
 # Keyboard → action mapping
 _KEY_TO_ACTION = {
     "w": Actions.up,    "up":    Actions.up,
@@ -117,7 +122,8 @@ def _render(state, num_agents: int, step: int, total_reward: float,
     """Clear *ax* and draw the current state in classic-Overcooked sprite style."""
     ax.clear()
 
-    px = render_state_pixels(state, env, with_labels=True)
+    px = render_state_pixels(state, env, tile_size=_INTERACTIVE_TILE_PX,
+                             with_labels=True)
     title = f"Step {step}  |  Reward {total_reward:.1f}  |  {recipe_label}"
     full = add_hud(px, title, num_agents=num_agents)
 
@@ -242,9 +248,9 @@ class InteractiveGourmetOvercooked:
     def run(self):
         self._reset()
 
-        # Scale figure size to the actual game grid (32 px / cell + HUD bar)
-        fig_w = max(5.0, self._W * 0.6)
-        fig_h = max(3.0, self._H * 0.7 + 0.5)
+        # Scale figure size to the actual game grid (64 px / cell + HUD bar).
+        fig_w = max(6.0, self._W * 1.0)
+        fig_h = max(4.0, self._H * 1.0 + 0.7)
         self._fig, self._ax = plt.subplots(figsize=(fig_w, fig_h))
         self._fig.tight_layout(pad=1.0)
         self._fig.canvas.mpl_connect("key_press_event", self._on_key)
