@@ -41,6 +41,7 @@ from jaxmarl.environments.overcooked.common import (
 from jaxmarl.environments.overcooked_gourmet.common import (
     OBJ_EMPTY, OBJ_WALL, OBJ_GOAL, OBJ_PLATE_PILE, OBJ_AGENT,
     OBJ_DISPENSER, OBJ_CUTTING_BOARD, OBJ_PLATE_ON_CTR, OBJ_RAW_ON_CTR,
+    MAX_TOOLS,
 )
 
 
@@ -60,11 +61,20 @@ _OC_AGENT      = OBJECT_TO_INDEX["agent"]
 # GourmetOvercooked maze_map → classic-Overcooked grid
 # ---------------------------------------------------------------------------
 
-def _gourmet_to_overcooked_grid(maze_map: np.ndarray, agent_view_size: int) -> np.ndarray:
+def _gourmet_to_overcooked_grid(maze_map: np.ndarray,
+                                agent_view_size: int,
+                                state=None) -> np.ndarray:
     """
     Crop away the agent_view_size pad and remap GourmetOvercooked OBJ_* codes
     + their colour bytes to the classic OBJECT_TO_INDEX / COLOR_TO_INDEX scheme
     that `OvercookedVisualizer._render_grid` understands.
+
+    If `state` is supplied, also rewrite each cooking-tool cell's meta byte
+    into the classic `pot_status` encoding (0 = done, 1-19 = cooking-progress
+    countdown, 20-23 = idle with that many ingredients added) so the classic
+    pot sprite renders the correct onions / progress bar. Without this the
+    gourmet meta byte (slot_idx | done<<4) is misinterpreted as a half-cooked
+    pot and the progress indicator behaves nonsensically.
 
     Returns an (H, W, 3) uint8 grid.
     """
@@ -73,9 +83,11 @@ def _gourmet_to_overcooked_grid(maze_map: np.ndarray, agent_view_size: int) -> n
 
     obj   = grid[:, :, 0].astype(np.int32)
     color = grid[:, :, 1].astype(np.int32)
+    meta  = grid[:, :, 2].astype(np.int32)
 
     new_obj   = np.full_like(obj, _OC_EMPTY)
     new_color = color.copy()  # agent colour bytes (a*2) are preserved as-is
+    new_meta  = meta.copy()
 
     # Walls / floor
     new_obj[obj == OBJ_EMPTY]        = _OC_EMPTY
@@ -104,13 +116,44 @@ def _gourmet_to_overcooked_grid(maze_map: np.ndarray, agent_view_size: int) -> n
     # COLOR_TO_AGENT_INDEX recovers agent index from this).
     new_obj[obj == OBJ_AGENT] = _OC_AGENT
 
+    # Synthesize pot_status from real tool state for cooking-tool cells.
+    if state is not None and tool_mask.any():
+        slot      = np.clip(meta & 0x0F, 0, MAX_TOOLS - 1)
+        timer     = np.asarray(state.tool_timer)[slot]                # int32, -1 idle
+        n_have    = np.asarray(state.tool_n_contents)[slot]
+        done      = np.asarray(state.tool_done)[slot].astype(bool)
+        comp_i    = np.clip(np.asarray(state.tool_comp_idx)[slot], 0, None)
+        cook_time = np.maximum(np.asarray(state.recipe_comp_cook)[comp_i], 1)
+
+        # Cooking-progress: timer = cook_time → 19 (just started, small bar);
+        # timer = 1 → 1 (almost done, wide bar); never 0 while cooking
+        # (the env transitions to done as soon as timer hits 0).
+        cook_status = np.maximum(
+            1, np.round(timer.astype(np.float32) / cook_time * 19).astype(np.int32)
+        )
+        # Idle-with-contents: classic uses 23 - n_onions in {20,21,22,23};
+        # cap at 20 if the gourmet recipe wanted >3 ingredients in the tool.
+        idle_with_contents = np.clip(23 - n_have, 20, 23)
+
+        is_cooking = timer > 0
+        is_idle    = timer < 0
+
+        pot_status = np.where(
+            done, 0,                                          # 0 = orange soup, no bar
+            np.where(
+                is_cooking, cook_status,                      # 1-19 = green bar
+                np.where(
+                    is_idle & (n_have > 0), idle_with_contents,
+                    23                                        # empty pot, lid closed
+                ),
+            ),
+        ).astype(np.int32)
+
+        new_meta = np.where(tool_mask, pot_status, meta)
+
     grid[:, :, 0] = new_obj.astype(np.uint8)
     grid[:, :, 1] = new_color.astype(np.uint8)
-    # NB: classic _render_pot reads channel-2 as pot_status (0=done, 1-19
-    # cooking, 20-23 onions added). We keep the gourmet meta byte in place;
-    # _render_pot will treat it as a status value and render some onions —
-    # close enough for a static frame. We always overlay a tool-type label
-    # on top below so the user can identify the affordance regardless.
+    grid[:, :, 2] = new_meta.astype(np.uint8)
     return grid
 
 
@@ -144,7 +187,7 @@ def render_state_pixels(state, env, *, tile_size: int = TILE_PIXELS,
     labels for ingredient_id / tool_type / plate completeness.
     """
     avs   = int(getattr(env, "agent_view_size", 5))
-    grid  = _gourmet_to_overcooked_grid(state.maze_map, avs)
+    grid  = _gourmet_to_overcooked_grid(state.maze_map, avs, state=state)
     inv_p = int(getattr(env, "INV_PLATE", 1))
     inv   = _gourmet_inv_to_overcooked(state.agent_inv, inv_p)
     dirs  = np.asarray(state.agent_dir_idx)
