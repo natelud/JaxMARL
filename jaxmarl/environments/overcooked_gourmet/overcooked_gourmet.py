@@ -231,8 +231,12 @@ class GourmetOvercooked(MultiAgentEnv):
         n_flat      = MAX_COMP * 3 + 3
         self._n_grid_ch = n_grid_ch
         self._n_flat    = n_flat
-        flat_len        = self._H * self._W * (n_grid_ch + n_flat)
-        self.obs_shape  = (flat_len,)
+        # Native spatial observation: (H, W, C) where
+        #   C = n_grid_ch (per-cell categorical layers) + n_flat (broadcasted
+        #       per-step scalars: time_frac, inv_frac, held_c, comp tool/cook/n_ingr).
+        # Networks always consume (B, H, W, C); flat-only networks must reshape
+        # internally.
+        self.obs_shape  = (self._H, self._W, n_grid_ch + n_flat)
 
         self.observation_spaces = {
             a: spaces.Box(0.0, 1.0, self.obs_shape) for a in self.agents
@@ -1232,7 +1236,10 @@ class GourmetOvercooked(MultiAgentEnv):
 
             grid    = jnp.stack(pos_ch + dir_ch + env_layers, axis=0)
             flat_bc = jnp.broadcast_to(flat_ai[:, None, None], (self._n_flat, H, W))
-            obs_dict[f"agent_{self_i}"] = jnp.concatenate([grid, flat_bc], axis=0).reshape(-1)
+            # Stack as (C, H, W) then transpose to native spatial (H, W, C) so
+            # CNN encoders consume it directly without reshape gymnastics.
+            obs_chw = jnp.concatenate([grid, flat_bc], axis=0)
+            obs_dict[f"agent_{self_i}"] = jnp.transpose(obs_chw, (1, 2, 0))
 
         return obs_dict
 
