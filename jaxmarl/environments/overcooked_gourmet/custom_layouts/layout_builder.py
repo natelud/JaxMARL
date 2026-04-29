@@ -358,14 +358,47 @@ def build(
             if 0 <= ny < H and 0 <= nx < W:
                 yield ny * W + nx
 
+    # Identify the floor region the agents will actually inhabit. A wall cell
+    # is only a usable counter if its floor-side neighbour is reachable —
+    # otherwise the placed item lives behind an inaccessible interior (e.g.
+    # the centre of an enclosed island), which silently breaks recipes.
+    def _bfs_floor(seeds):
+        visited: set = set()
+        stack = [s for s in seeds if s in floor_cells]
+        while stack:
+            c = stack.pop()
+            if c in visited:
+                continue
+            visited.add(c)
+            for n in neighbors(c):
+                if n in floor_cells and n not in visited:
+                    stack.append(n)
+        return visited
+
+    if agent_spawns:
+        # BFS from every fixed `A` spawn — agents may live in disjoint rooms.
+        reachable_floor = _bfs_floor(agent_spawns)
+    else:
+        # No fixed spawns — agents will be placed on random floor below. Treat
+        # the largest connected floor component as canonical so the placement
+        # filter is well-defined; we restrict that random fallback below too.
+        remaining = set(floor_cells)
+        reachable_floor = set()
+        while remaining:
+            seed_idx = next(iter(remaining))
+            comp = _bfs_floor([seed_idx])
+            if len(comp) > len(reachable_floor):
+                reachable_floor = comp
+            remaining -= comp
+
     counter_cells_set = {
-        c for c in wall_cells if any(n in floor_cells for n in neighbors(c))
+        c for c in wall_cells if any(n in reachable_floor for n in neighbors(c))
     }
     counter_cells = list(counter_cells_set)
     rng.shuffle(counter_cells)
 
     if not counter_cells:
-        raise ValueError("No counter cells found adjacent to floor cells.")
+        raise ValueError("No counter cells found adjacent to reachable floor cells.")
 
     # ── Expand ITEMS ───────────────────────────────────────────────────────────
     flat_items = _expand_items(items, recipes, recipe_db)
@@ -423,7 +456,10 @@ def build(
         final_agent_idx = agent_spawns[:num_agents]
     else:
         used = set(agent_spawns)
-        free_floor = [c for c in floor_cells if c not in used]
+        # Restrict the random-spawn pool to the same reachable floor region the
+        # counter filter used. Otherwise we'd risk spawning an agent inside an
+        # unreachable island, where the policy can never interact with anything.
+        free_floor = [c for c in reachable_floor if c not in used]
         rng.shuffle(free_floor)
         extra = num_agents - len(agent_spawns)
         final_agent_idx = agent_spawns + free_floor[:extra]
