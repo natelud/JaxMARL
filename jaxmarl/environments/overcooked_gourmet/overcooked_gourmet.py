@@ -136,6 +136,7 @@ class GourmetOvercooked(MultiAgentEnv):
         random_reset: bool = False,
         instantaneous_cook: bool = False,
         expanded_actions: bool = False,
+        restrict_ingredient_drops: bool = False,
         recipe_db_path: Optional[str] = None,
     ):
         """
@@ -212,6 +213,12 @@ class GourmetOvercooked(MultiAgentEnv):
         self.random_reset       = random_reset
         self.instantaneous_cook = instantaneous_cook
         self.expanded_actions   = expanded_actions
+        # Variant: when True, agents cannot place a held raw ingredient on a
+        # counter — only into a tool (the existing `_case_add_to_tool` branch)
+        # or back onto a dispenser cell (the dispenser-return path) is allowed.
+        # Plates (with or without food) are unaffected and can still be set
+        # down on counters as usual.
+        self.restrict_ingredient_drops = restrict_ingredient_drops
         self.agent_view_size    = 5
         self._layout            = layout
 
@@ -828,6 +835,13 @@ class GourmetOvercooked(MultiAgentEnv):
         )
         reward += r5; shaped += s5
 
+        # Variant: discard a held raw ingredient by facing a dispenser cell.
+        # No-op unless `restrict_ingredient_drops` is True.
+        state, r5b, s5b = self._case_discard_to_dispenser(
+            state, agent_idx, is_dispenser_eff, holding_raw,
+        )
+        reward += r5b; shaped += s5b
+
         state, r6, s6 = self._case_drop(
             state, fwd_pos, agent_idx,
             is_table_eff, is_empty_counter, inv, plate_idx, holding_raw, holding_plate,
@@ -989,6 +1003,31 @@ class GourmetOvercooked(MultiAgentEnv):
         state, r, s = jax.lax.cond(can, _do, _skip, state)
         return state, r, s
 
+    def _case_discard_to_dispenser(
+        self, state, agent_idx, is_dispenser, holding_raw,
+    ):
+        """Variant-only: when restrict_ingredient_drops is True, an agent
+        holding a raw ingredient can discard it by interacting with any
+        dispenser cell. The ingredient is removed from the agent's inventory
+        (the dispenser is conceptually infinite, so no state changes there).
+        No reward is given; the agent simply gets back to empty-handed.
+        When the variant flag is False this branch is a no-op (always skip)
+        so the original env semantics are preserved exactly.
+        """
+        if not self.restrict_ingredient_drops:
+            return state, 0.0, 0.0
+        can = is_dispenser & holding_raw
+
+        def _do(st):
+            new_inv = st.agent_inv.at[agent_idx].set(INV_EMPTY)
+            return st.replace(agent_inv=new_inv), 0.0, 0.0
+
+        def _skip(st):
+            return st, 0.0, 0.0
+
+        state, r, s = jax.lax.cond(can, _do, _skip, state)
+        return state, r, s
+
     def _case_pickup_dispenser(self, state, agent_idx, is_dispenser, holding_nothing, ingr_meta):
         # `ingr_meta` is the dispenser SLOT INDEX (see _build_maze_map). Look
         # up the real ingredient ID from state.disp_ingredient — this is what
@@ -1013,7 +1052,16 @@ class GourmetOvercooked(MultiAgentEnv):
         PAD = self.agent_view_size - 1
         fwd_x, fwd_y = fwd_pos[0], fwd_pos[1]
 
-        can_drop = is_table & is_empty_counter & (holding_raw | holding_plate)
+        # Plates (with or without food) can always be set on counters.
+        # Raw ingredients can be set on counters only when the variant flag
+        # `restrict_ingredient_drops` is False; otherwise the only legal
+        # ways to relinquish a held ingredient are (a) deposit it in a tool
+        # (handled in `_case_add_to_tool`) or (b) discard it onto a
+        # dispenser (handled separately below in `_case_discard_to_dispenser`).
+        if self.restrict_ingredient_drops:
+            can_drop = is_table & is_empty_counter & holding_plate
+        else:
+            can_drop = is_table & is_empty_counter & (holding_raw | holding_plate)
 
         def _do_raw(st):
             # 16-bit ingredient ID: high byte in channel 1 (where the env
