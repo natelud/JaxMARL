@@ -274,6 +274,23 @@ def _overlay_labels(img: np.ndarray, state, env, tile_size: int) -> np.ndarray:
             n_have = int(state.plate_n_contents[pi])
             _draw(x, y, f"{n_have}/{n_req}")
 
+    # Held plates — show n_contents / required at the agent's cell so the
+    # plate's progress is visible while it's in inventory (mirrors the
+    # on-counter label). Cyan fg distinguishes it from the on-counter
+    # label (default white), making it clear which plate is being held.
+    if hasattr(state, "agent_plate_idx") and hasattr(state, "agent_inv"):
+        n_req = int(state.recipe_n_comps)
+        inv_p = int(getattr(env, "INV_PLATE", -1))
+        for ai in range(int(state.agent_inv.shape[0])):
+            if int(state.agent_inv[ai]) != inv_p:
+                continue
+            pi = int(state.agent_plate_idx[ai])
+            if pi < 0:
+                continue
+            x, y = int(state.agent_pos[ai, 0]), int(state.agent_pos[ai, 1])
+            n_have = int(state.plate_n_contents[pi])
+            _draw(x, y, f"{n_have}/{n_req}", fg=(120, 240, 255))
+
     # Loose raw ingredient on a counter (OBJ_RAW_ON_CTR) — show ingredient_id.
     # The id is packed across maze_map channels 1 (high byte) and 2 (low byte)
     # by `_case_drop._do_raw`, so we reassemble both. There's no state list of

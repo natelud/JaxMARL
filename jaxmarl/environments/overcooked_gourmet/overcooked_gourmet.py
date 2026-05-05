@@ -981,8 +981,16 @@ class GourmetOvercooked(MultiAgentEnv):
         can = is_plate_pile & holding_nothing
 
         def _do(st):
-            free_slot = jnp.argmin(st.plate_exists.astype(jnp.int32) +
-                                    jnp.arange(MAX_PLATES) * 1000)
+            # Find the lowest-index slot where plate_exists is False.
+            # `plate_exists * MAX_PLATES` is the dominant cost (big penalty
+            # for occupied slots) and `arange` is the tiebreaker (prefer
+            # earlier free slots). Previous implementation had these factors
+            # swapped, which made argmin always pick slot 0 — overwriting any
+            # existing plate stored there and wiping its contents/n_contents.
+            free_slot = jnp.argmin(
+                st.plate_exists.astype(jnp.int32) * MAX_PLATES
+                + jnp.arange(MAX_PLATES)
+            )
             pi    = jnp.where(jnp.any(~st.plate_exists), free_slot, -1)
             valid = pi >= 0
 
