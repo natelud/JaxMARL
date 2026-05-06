@@ -233,6 +233,14 @@ class GourmetState:
     tool_needed_n:   chex.Array   # (MAX_TOOLS,)                int32
     tool_timer:      chex.Array   # (MAX_TOOLS,)                int32  -1=idle 0=done >0=cooking
     tool_done:       chex.Array   # (MAX_TOOLS,)                bool
+    # Ingredient_ids still required to complete the active component, per tool.
+    # Initialised from `recipe_comp_ingr[tool_comp_idx]`; each successful
+    # deposit consumes one matching slot (set to -1). When the tool fills up,
+    # only an EXACT-multiset deposit sequence is accepted — depositing 3
+    # cheeses for a recipe needing [cheese, onion, red pepper] is rejected
+    # because once cheese's slot is consumed the tool has nothing matching
+    # cheese left in `remaining`. Reset to the recipe ingredients on collect.
+    tool_ingr_remaining: chex.Array  # (MAX_TOOLS, MAX_INGR_PER_COMP) int32
 
     # ── Plates ──────────────────────────────────────────────────────────────
     plate_pos:        chex.Array  # (MAX_PLATES, 2)              int32

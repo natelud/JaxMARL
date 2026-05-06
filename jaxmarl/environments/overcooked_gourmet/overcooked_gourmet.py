@@ -432,6 +432,10 @@ class GourmetOvercooked(MultiAgentEnv):
         tool_active   = np.zeros((MAX_TOOLS,), dtype=bool)
         tool_needed_n = np.zeros((MAX_TOOLS,), dtype=np.int32)
         comp_assigned = [False] * n_comps
+        # Per-tool remaining ingredient multiset (a copy of the recipe's
+        # comp_ingr row for the bound component; -1 padding for inactive
+        # tools or unused slots). Each successful deposit consumes one slot.
+        tool_ingr_remaining = np.full((MAX_TOOLS, MAX_INGR_PER_COMP), -1, dtype=np.int32)
         for i in range(n_tools):
             fi, tt = tool_slots[i]
             ty, tx = divmod(int(fi), W)
@@ -443,6 +447,7 @@ class GourmetOvercooked(MultiAgentEnv):
                     tool_comp_idx[i]  = ci
                     tool_needed_n[i]  = comps[ci]["n_ingredients"]
                     tool_active[i]    = True
+                    tool_ingr_remaining[i] = self._rec_comp_ingr[recipe_idx, ci]
                     break
 
         # Agent spawn positions
@@ -502,6 +507,7 @@ class GourmetOvercooked(MultiAgentEnv):
             tool_needed_n     = jnp.array(tool_needed_n),
             tool_timer        = jnp.full(MAX_TOOLS, -1, dtype=jnp.int32),
             tool_done         = jnp.zeros(MAX_TOOLS, dtype=bool),
+            tool_ingr_remaining = jnp.array(tool_ingr_remaining, dtype=jnp.int32),
 
             plate_pos         = jnp.array(plate_pos, dtype=jnp.int32),
             plate_on_counter  = jnp.array(plate_on_ctr),
@@ -879,13 +885,24 @@ class GourmetOvercooked(MultiAgentEnv):
             has_room = st.tool_n_contents[ti] < st.tool_needed_n[ti]
 
             comp_i       = st.tool_comp_idx[ti]
-            n_ingr_valid = st.recipe_comp_n_ingr[comp_i]
-            ingr_list    = st.recipe_comp_ingr[comp_i]
-            ingr_needed  = jnp.any(
-                (jnp.arange(MAX_INGR_PER_COMP) < n_ingr_valid) & (ingr_list == raw_ingr_id)
-            )
+            # Strict multiset: deposit is valid only if there's still an
+            # *unconsumed* slot in this tool's `tool_ingr_remaining` matching
+            # raw_ingr_id. Once a slot is consumed (set to -1) the next deposit
+            # of the same id is rejected — closes the "3 cheeses for a
+            # cuttable that needs cheese+onion+red_pepper" exploit.
+            remaining    = st.tool_ingr_remaining[ti]                     # (MAX_INGR_PER_COMP,)
+            matches      = remaining == raw_ingr_id                       # (MAX_INGR_PER_COMP,) bool
+            ingr_needed  = jnp.any(matches)
+            # Index of the first matching slot to consume on success.
+            consume_slot = jnp.argmax(matches.astype(jnp.int32))
 
             valid = active & idle & has_room & ingr_needed
+
+            new_remaining = jnp.where(
+                valid,
+                st.tool_ingr_remaining.at[ti, consume_slot].set(jnp.int32(-1)),
+                st.tool_ingr_remaining,
+            )
 
             new_n = jnp.where(valid, st.tool_n_contents.at[ti].set(st.tool_n_contents[ti] + 1),
                               st.tool_n_contents)
@@ -902,7 +919,8 @@ class GourmetOvercooked(MultiAgentEnv):
             sh      = jnp.where(valid, float(INGREDIENT_IN_TOOL_REW), 0.0)
 
             return st.replace(tool_n_contents=new_n, tool_timer=new_timer,
-                              tool_done=new_done, agent_inv=new_inv), 0.0, sh
+                              tool_done=new_done, agent_inv=new_inv,
+                              tool_ingr_remaining=new_remaining), 0.0, sh
 
         def _skip(st): return st, 0.0, 0.0
         state, r, s = jax.lax.cond(can, _do, _skip, state)
@@ -941,10 +959,18 @@ class GourmetOvercooked(MultiAgentEnv):
             new_timer = jnp.where(valid, st.tool_timer.at[ti].set(-1), st.tool_timer)
             new_tdone = jnp.where(valid, st.tool_done.at[ti].set(False), st.tool_done)
             sh        = jnp.where(valid, float(COMP_PICKUP_REW), 0.0)
+            # Refill the tool's required-ingredient multiset so the next
+            # cooking cycle starts with a fresh remaining-set.
+            new_remaining = jnp.where(
+                valid,
+                st.tool_ingr_remaining.at[ti, :].set(st.recipe_comp_ingr[comp_i, :]),
+                st.tool_ingr_remaining,
+            )
 
             return st.replace(
                 plate_contents=new_pcon, plate_n_contents=new_pn, plate_complete=new_pcomp,
                 tool_n_contents=new_tn, tool_timer=new_timer, tool_done=new_tdone,
+                tool_ingr_remaining=new_remaining,
             ), 0.0, sh
 
         def _skip(st): return st, 0.0, 0.0
@@ -957,16 +983,23 @@ class GourmetOvercooked(MultiAgentEnv):
         def _do(st):
             pi         = jnp.where(plate_idx >= 0, plate_idx, 0)
             is_complete = st.plate_complete[pi]
-            valid       = (plate_idx >= 0) & is_complete
+            # Delivery FIRES on any held-plate-at-goal (state changes happen);
+            # reward is paid ONLY when the plate's contents are an exact
+            # multiset match for the recipe. Wrong-comp / over-stuffed plates
+            # are still consumed but pay 0. This avoids the "delivery action
+            # silently no-ops" trap from earlier — the agent visibly loses
+            # the plate so it learns to bring the right composition.
+            delivery   = (plate_idx >= 0)
+            paid       = delivery & is_complete
 
-            new_exists = jnp.where(valid, st.plate_exists.at[pi].set(False), st.plate_exists)
-            new_on_ctr = jnp.where(valid, st.plate_on_counter.at[pi].set(False), st.plate_on_counter)
-            new_pcon   = jnp.where(valid, st.plate_contents.at[pi, :].set(-1), st.plate_contents)
-            new_pn     = jnp.where(valid, st.plate_n_contents.at[pi].set(0), st.plate_n_contents)
-            new_pcomp  = jnp.where(valid, st.plate_complete.at[pi].set(False), st.plate_complete)
-            new_inv    = jnp.where(valid, st.agent_inv.at[agent_idx].set(INV_EMPTY), st.agent_inv)
-            new_pidx   = jnp.where(valid, st.agent_plate_idx.at[agent_idx].set(-1), st.agent_plate_idx)
-            rew        = jnp.where(valid, float(DELIVERY_REWARD), 0.0)
+            new_exists = jnp.where(delivery, st.plate_exists.at[pi].set(False), st.plate_exists)
+            new_on_ctr = jnp.where(delivery, st.plate_on_counter.at[pi].set(False), st.plate_on_counter)
+            new_pcon   = jnp.where(delivery, st.plate_contents.at[pi, :].set(-1), st.plate_contents)
+            new_pn     = jnp.where(delivery, st.plate_n_contents.at[pi].set(0), st.plate_n_contents)
+            new_pcomp  = jnp.where(delivery, st.plate_complete.at[pi].set(False), st.plate_complete)
+            new_inv    = jnp.where(delivery, st.agent_inv.at[agent_idx].set(INV_EMPTY), st.agent_inv)
+            new_pidx   = jnp.where(delivery, st.agent_plate_idx.at[agent_idx].set(-1), st.agent_plate_idx)
+            rew        = jnp.where(paid, float(DELIVERY_REWARD), 0.0)
 
             return st.replace(
                 plate_exists=new_exists, plate_on_counter=new_on_ctr,
