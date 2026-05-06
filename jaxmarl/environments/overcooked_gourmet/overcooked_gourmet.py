@@ -931,7 +931,8 @@ class GourmetOvercooked(MultiAgentEnv):
                                   st.plate_n_contents)
 
             new_complete_flag = _check_plate_complete(
-                new_pcon[pi], st.recipe_comp_ids, st.recipe_n_comps
+                new_pcon[pi], st.recipe_comp_ids, st.recipe_n_comps,
+                new_pn[pi],
             )
             new_pcomp = jnp.where(valid, st.plate_complete.at[pi].set(new_complete_flag),
                                    st.plate_complete)
@@ -1338,8 +1339,24 @@ def _check_plate_complete(
     plate_row: chex.Array,
     req_ids:   chex.Array,
     n_req:     chex.Array,
+    n_have:    chex.Array,
 ) -> chex.Array:
-    """True iff every required component ID appears in plate_row."""
-    valid  = jnp.arange(MAX_COMP) < n_req
-    present = jnp.any(req_ids[:, None] == plate_row[None, :], axis=1)
-    return jnp.all(jnp.where(valid, present, True))
+    """True iff plate is an EXACT multiset match for the recipe.
+
+    Strict semantics:
+        - count match: `n_have == n_req` (no extras, no missing)
+        - multiset equality of `plate_row[:n_req]` and `req_ids[:n_req]`
+          (handles recipes that legitimately need duplicate components)
+
+    The plate may physically hold more than `n_req` items (the env does not
+    cap collection), but `plate_complete` will be False in that case so
+    delivery yields zero reward — the agent has to deliver the plate at
+    exactly the right composition or get nothing.
+    """
+    counts_match = (n_have == n_req)
+    valid = jnp.arange(MAX_COMP) < n_req
+    BIG   = jnp.int32(2 ** 30)
+    sorted_plate = jnp.sort(jnp.where(valid, plate_row, BIG))
+    sorted_req   = jnp.sort(jnp.where(valid, req_ids,   BIG))
+    multiset_match = jnp.all(sorted_plate == sorted_req)
+    return counts_match & multiset_match
