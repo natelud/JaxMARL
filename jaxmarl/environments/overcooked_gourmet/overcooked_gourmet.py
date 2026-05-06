@@ -52,7 +52,7 @@ from .common import (
     # state struct
     GourmetState,
     # rewards
-    DELIVERY_REWARD, INGREDIENT_IN_TOOL_REW, COMP_PICKUP_REW, URGENCY_CUTOFF,
+    DELIVERY_REWARD, WRONG_DELIVERY_PENALTY, INGREDIENT_IN_TOOL_REW, COMP_PICKUP_REW, URGENCY_CUTOFF,
 )
 
 
@@ -989,8 +989,9 @@ class GourmetOvercooked(MultiAgentEnv):
             # are still consumed but pay 0. This avoids the "delivery action
             # silently no-ops" trap from earlier — the agent visibly loses
             # the plate so it learns to bring the right composition.
-            delivery   = (plate_idx >= 0)
-            paid       = delivery & is_complete
+            delivery     = (plate_idx >= 0)
+            paid         = delivery & is_complete
+            wrong_delivery = delivery & ~is_complete
 
             new_exists = jnp.where(delivery, st.plate_exists.at[pi].set(False), st.plate_exists)
             new_on_ctr = jnp.where(delivery, st.plate_on_counter.at[pi].set(False), st.plate_on_counter)
@@ -999,7 +1000,13 @@ class GourmetOvercooked(MultiAgentEnv):
             new_pcomp  = jnp.where(delivery, st.plate_complete.at[pi].set(False), st.plate_complete)
             new_inv    = jnp.where(delivery, st.agent_inv.at[agent_idx].set(INV_EMPTY), st.agent_inv)
             new_pidx   = jnp.where(delivery, st.agent_plate_idx.at[agent_idx].set(-1), st.agent_plate_idx)
-            rew        = jnp.where(paid, float(DELIVERY_REWARD), 0.0)
+            # Sparse reward: +DELIVERY_REWARD on a complete-plate delivery,
+            # -WRONG_DELIVERY_PENALTY on an incomplete/wrong-plate delivery,
+            # 0 otherwise (no plate held → no-op delivery action).
+            rew        = (
+                jnp.where(paid,           float(DELIVERY_REWARD),         0.0)
+              + jnp.where(wrong_delivery, -float(WRONG_DELIVERY_PENALTY), 0.0)
+            )
 
             return st.replace(
                 plate_exists=new_exists, plate_on_counter=new_on_ctr,

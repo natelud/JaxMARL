@@ -268,6 +268,7 @@ class GourmetState:
 # ---------------------------------------------------------------------------
 
 DELIVERY_REWARD        = 40
+WRONG_DELIVERY_PENALTY = 10   # paid when agent delivers an incomplete/wrong plate
 INGREDIENT_IN_TOOL_REW = 0.5
 COMP_PICKUP_REW        = 1.5
 URGENCY_CUTOFF         = 40
