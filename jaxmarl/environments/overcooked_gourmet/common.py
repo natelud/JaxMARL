@@ -267,7 +267,7 @@ class GourmetState:
 # Reward constants
 # ---------------------------------------------------------------------------
 
-DELIVERY_REWARD        = 100
+DELIVERY_REWARD        = 40
 INGREDIENT_IN_TOOL_REW = 0.5
 COMP_PICKUP_REW        = 1.5
 URGENCY_CUTOFF         = 40
