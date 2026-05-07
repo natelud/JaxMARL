@@ -132,7 +132,7 @@ class GourmetOvercooked(MultiAgentEnv):
         self,
         layout,
         num_agents: int = 2,
-        max_steps:  int = 500,
+        max_steps:  int = 800,
         random_reset: bool = False,
         instantaneous_cook: bool = False,
         expanded_actions: bool = False,
