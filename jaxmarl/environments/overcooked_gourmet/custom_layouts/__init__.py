@@ -6,10 +6,10 @@ Quick start
     from jaxmarl.environments.overcooked_gourmet.custom_layouts import build, load
 
     layout = load("gourmet_bistro", seed=3)
-    env = GourmetOvercooked(recipe_ids=layout["recipe_ids"])
+    env = GourmetOvercooked(layout=layout)
 
-    layout = load("chicken_alfredo", seed=0)
-    env = GourmetOvercooked(recipe_ids=layout["recipe_ids"])
+    layout = load("chicken_alfredo_primavera", seed=0)
+    env = GourmetOvercooked(layout=layout)
 """
 
 from .layout_builder import build, load

@@ -107,10 +107,11 @@ class GourmetOvercooked(MultiAgentEnv):
 
     Parameters
     ----------
-    recipe_ids : list[int] | int | "all"
-        Recipes eligible each episode. A single recipe is sampled at reset.
+    layout : FrozenDict (REQUIRED)
+        Built layout (see custom_layouts.load / layout_builder). Recipes come
+        from layout["recipe_ids"]; there is no recipe_ids constructor arg.
     num_agents : int   (default 2)
-    max_steps  : int   (default 500)
+    max_steps  : int   (default 800)
     random_reset : bool  (default False)
     instantaneous_cook : bool  (default False)
     expanded_actions : bool  (default False)

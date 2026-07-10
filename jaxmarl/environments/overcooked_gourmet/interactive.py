@@ -4,7 +4,7 @@ interactive.py — Matplotlib-based interactive player for GourmetOvercooked.
 Usage
 -----
     python -m jaxmarl.environments.overcooked_gourmet.interactive --layout cramped_room
-    python -m jaxmarl.environments.overcooked_gourmet.interactive --layout chicken_alfredo --num_agents 2
+    python -m jaxmarl.environments.overcooked_gourmet.interactive --layout chicken_alfredo_primavera --num_agents 2
     python -m jaxmarl.environments.overcooked_gourmet.interactive --list_layouts
 
 `--layout` is required: the layout file specifies the kitchen geometry, item
@@ -260,7 +260,7 @@ def main():
     )
     parser.add_argument(
         "--layout", type=str, default=None,
-        help="Named custom layout to use (e.g. cramped_room, chicken_alfredo). "
+        help="Named custom layout to use (e.g. cramped_room, chicken_alfredo_primavera). "
              "REQUIRED unless --list_layouts is set. Run with --list_layouts to "
              "see all available names.",
     )
