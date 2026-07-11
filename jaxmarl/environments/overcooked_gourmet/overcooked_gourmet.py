@@ -359,6 +359,39 @@ class GourmetOvercooked(MultiAgentEnv):
             obs, st = self._reset_for_recipe(dummy_key, rid)
             self._cached_resets.append((obs, st))
 
+    def reset_for_recipe_on_layout(self, layout, recipe_id: int, key=None):
+        """
+        Swap in a new pre-built layout and return a reset for ONE recipe.
+
+        Lighter-weight sibling of `rebuild_layouts` for curriculum training:
+        the kitchen is "restocked" (tool slots + dispenser slots re-placed for
+        the active recipe) without rebuilding the cached resets of every other
+        allowed recipe. `self._cached_resets` (used by `reset`/auto-reset when
+        no `reset_state` is forced) is left stale on purpose — callers that
+        restock per-chunk must pass the returned state as `reset_state` to
+        `step` so auto-resets stay on the restocked kitchen.
+
+        Constraints: the new layout's grid must match the constructor
+        layout's height/width (obs shape is baked at __init__), and
+        `recipe_id` must be in the env's allowed recipe set.
+
+        Returns (obs_dict, GourmetState) for a fresh episode of `recipe_id`.
+        """
+        if int(layout["height"]) != self._H or int(layout["width"]) != self._W:
+            raise ValueError(
+                f"reset_for_recipe_on_layout: grid {layout['height']}x"
+                f"{layout['width']} does not match env grid {self._H}x{self._W}."
+            )
+        if int(recipe_id) not in self._allowed:
+            raise ValueError(
+                f"reset_for_recipe_on_layout: recipe {recipe_id} not in the "
+                f"env's allowed set {sorted(self._allowed)}."
+            )
+        self._layout = layout
+        if key is None:
+            key = jax.random.PRNGKey(0)
+        return self._reset_for_recipe(key, int(recipe_id))
+
     def _reset_for_recipe(self, key, recipe_idx: int):
         # Per-recipe RNG: different recipes get independent shuffles. The
         # placement seed is baked into the layout at build time; here we only
