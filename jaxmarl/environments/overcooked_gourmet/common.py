@@ -268,7 +268,10 @@ class GourmetState:
 # ---------------------------------------------------------------------------
 
 DELIVERY_REWARD        = 40
-WRONG_DELIVERY_PENALTY = 10   # paid when agent delivers an incomplete/wrong plate
+WRONG_DELIVERY_PENALTY = 0    # wrong-plate deliveries are unrewarded but no longer
+                              # penalised (Nate 2026-07-10 — the -10 biased the
+                              # deliveries-per-episode readout and punished exploration
+                              # in the multi-recipe curriculum)
 INGREDIENT_IN_TOOL_REW = 0.5
 COMP_PICKUP_REW        = 1.5
 URGENCY_CUTOFF         = 40
