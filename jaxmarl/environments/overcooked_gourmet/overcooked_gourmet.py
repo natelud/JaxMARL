@@ -53,6 +53,8 @@ from .common import (
     GourmetState,
     # rewards
     DELIVERY_REWARD, WRONG_DELIVERY_PENALTY, INGREDIENT_IN_TOOL_REW, COMP_PICKUP_REW, URGENCY_CUTOFF,
+    # retained step-through staircase: one-shot plate-complete bonus + bootstrapping
+    PLATE_COMPLETE_REW, PICKUP_REW, TOOL_FACE_REW,
 )
 
 
@@ -484,6 +486,21 @@ class GourmetOvercooked(MultiAgentEnv):
                     tool_ingr_remaining[i] = self._rec_comp_ingr[recipe_idx, ci]
                     break
 
+        # Per-dispenser bootstrapping budget: how many of each dispenser's
+        # ingredient the recipe needs (= its multiplicity in the flattened
+        # recipe ingredient multiset). Drives the per-cycle pickup / tool-face
+        # reward caps.
+        recipe_ingr_flat = [
+            int(ing)
+            for ci in range(n_comps)
+            for ing in self._rec_comp_ingr[recipe_idx, ci]
+            if int(ing) >= 0
+        ]
+        cycle_budget_full = np.zeros((MAX_DISP,), dtype=np.int32)
+        for d in range(MAX_DISP):
+            if disp_active[d]:
+                cycle_budget_full[d] = recipe_ingr_flat.count(int(disp_ingr[d]))
+
         # Agent spawn positions
         agent_flat = np.asarray(layout["agent_idx"])
         spawns     = [(int(fi) % W, int(fi) // W) for fi in agent_flat]
@@ -542,6 +559,10 @@ class GourmetOvercooked(MultiAgentEnv):
             tool_timer        = jnp.full(MAX_TOOLS, -1, dtype=jnp.int32),
             tool_done         = jnp.zeros(MAX_TOOLS, dtype=bool),
             tool_ingr_remaining = jnp.array(tool_ingr_remaining, dtype=jnp.int32),
+
+            cycle_budget_full = jnp.array(cycle_budget_full, dtype=jnp.int32),
+            cycle_pickup_rem  = jnp.array(cycle_budget_full, dtype=jnp.int32),
+            cycle_face_rem    = jnp.array(cycle_budget_full, dtype=jnp.int32),
 
             plate_pos         = jnp.array(plate_pos, dtype=jnp.int32),
             plate_on_counter  = jnp.array(plate_on_ctr),
@@ -635,7 +656,29 @@ class GourmetOvercooked(MultiAgentEnv):
         acts = jnp.array([actions[a] for a in self.agents], dtype=jnp.int32)
         acts = self.action_set.take(acts)
 
+        # Retained "step-through" shaping. `_step_agents` emits the per-event
+        # deposit (INGREDIENT_IN_TOOL_REW) and collect (COMP_PICKUP_REW)
+        # rewards; here we add the one-shot plate-complete bonus for any plate
+        # that flips to a complete, deliverable match this step. All three are
+        # RETAINED (not clawed back), forming a monotone assemble->deliver
+        # staircase. Non-farmable via the delivery-gated tool refill (see
+        # common.py) + WRONG_DELIVERY_PENALTY.
+        complete_before = state.plate_complete
+        pre_inv         = state.agent_inv
         state, reward, shaped = self._step_agents(key, state, acts)
+        newly_complete = jnp.sum(
+            (state.plate_complete & ~complete_before).astype(jnp.float32)
+        )
+        shaped = shaped + jnp.broadcast_to(
+            newly_complete * float(PLATE_COMPLETE_REW), (self.num_agents,)
+        )
+        # Budgeted bootstrapping: pickup (+PICKUP_REW) and tool-face
+        # (+TOOL_FACE_REW), which break the long unrewarded pickup->carry->
+        # deposit gap into steps. Per-dispenser per-cycle budgets keep them
+        # un-farmable (no pick/drop or face/unface loop).
+        state, boot = self._bootstrap_rewards(state, pre_inv)
+        shaped = shaped + boot
+
         state = state.replace(time=state.time + 1)
         done  = self.is_terminal(state)
         state = state.replace(terminal=done)
@@ -648,6 +691,65 @@ class GourmetOvercooked(MultiAgentEnv):
             {**{a: done for a in self.agents}, "__all__": done},
             {"shaped_reward": {a: shaped[i] for i, a in enumerate(self.agents)}},
         )
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Bootstrapping shaping (budgeted pickup + tool-face)
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _bootstrap_rewards(self, state: GourmetState, pre_inv: chex.Array):
+        """Per-cycle-budgeted pickup and tool-face shaping.
+
+        pickup    (+PICKUP_REW):    agent_inv went EMPTY -> a recipe ingredient
+                                    this step, and that ingredient's dispenser
+                                    slot still has pickup budget this cycle.
+        tool-face (+TOOL_FACE_REW): agent is holding a recipe ingredient and its
+                                    forward cell is an active tool that still
+                                    needs that ingredient, and the slot still has
+                                    face budget this cycle.
+
+        Budgets (`cycle_pickup_rem` / `cycle_face_rem`, keyed by dispenser slot)
+        are decremented as paid and refilled to `cycle_budget_full` on delivery
+        (_case_deliver), so neither reward can be farmed by a reversible loop.
+        Returns (state_with_decremented_budgets, boot_reward[num_agents]).
+        """
+        post_inv = state.agent_inv
+        disp_ing = state.disp_ingredient
+        disp_act = state.disp_active
+        pick_rem = state.cycle_pickup_rem
+        face_rem = state.cycle_face_rem
+        boot     = jnp.zeros((self.num_agents,), dtype=jnp.float32)
+
+        def disp_slot_of(raw_id):
+            # First active dispenser vending raw_id, or -1 if none.
+            match = disp_act & (disp_ing == raw_id)
+            return jnp.where(jnp.any(match), jnp.argmax(match), -1)
+
+        for a in range(self.num_agents):
+            held        = post_inv[a]
+            holding_raw = (held > INV_EMPTY) & (held <= self.N_INGR)
+            raw_id      = held - 1
+            d           = disp_slot_of(raw_id)
+            d_s         = jnp.where(d >= 0, d, 0)
+
+            # ── pickup: empty -> holding a recipe ingredient ──
+            is_pickup = (pre_inv[a] == INV_EMPTY) & holding_raw
+            pick_ok   = is_pickup & (d >= 0) & (pick_rem[d_s] > 0)
+            pick_rem  = pick_rem.at[d_s].add(-pick_ok.astype(jnp.int32))
+            boot      = boot.at[a].add(pick_ok.astype(jnp.float32) * float(PICKUP_REW))
+
+            # ── tool-face: holding a recipe ingredient, facing a tool that
+            #    still needs it ──
+            fwd        = state.agent_pos[a] + state.agent_dir[a]         # (2,)
+            tool_here  = state.tool_active & jnp.all(
+                state.tool_pos == fwd[None, :], axis=-1)                 # (MAX_TOOLS,)
+            needs_raw  = jnp.any(state.tool_ingr_remaining == raw_id, axis=-1)
+            facing_ok  = jnp.any(tool_here & needs_raw)
+            face_ok    = holding_raw & facing_ok & (d >= 0) & (face_rem[d_s] > 0)
+            face_rem   = face_rem.at[d_s].add(-face_ok.astype(jnp.int32))
+            boot       = boot.at[a].add(face_ok.astype(jnp.float32) * float(TOOL_FACE_REW))
+
+        state = state.replace(cycle_pickup_rem=pick_rem, cycle_face_rem=face_rem)
+        return state, boot
 
     # ────────────────────────────────────────────────────────────────────────
     # Movement + interaction
@@ -1051,6 +1153,11 @@ class GourmetOvercooked(MultiAgentEnv):
             new_tool_timer = jnp.where(delivery & st.tool_active, -1,    st.tool_timer)
             new_tool_done  = jnp.where(delivery & st.tool_active, False, st.tool_done)
 
+            # Refill the per-cycle pickup / tool-face bootstrapping budgets so
+            # the next dish can re-earn them (same timing as the tool refill).
+            new_cycle_pickup = jnp.where(delivery, st.cycle_budget_full, st.cycle_pickup_rem)
+            new_cycle_face   = jnp.where(delivery, st.cycle_budget_full, st.cycle_face_rem)
+
             # Sparse reward: +DELIVERY_REWARD on a complete-plate delivery,
             # -WRONG_DELIVERY_PENALTY on an incomplete/wrong-plate delivery,
             # 0 otherwise (no plate held → no-op delivery action).
@@ -1065,6 +1172,7 @@ class GourmetOvercooked(MultiAgentEnv):
                 agent_inv=new_inv, agent_plate_idx=new_pidx,
                 tool_ingr_remaining=new_tool_rem, tool_n_contents=new_tool_n,
                 tool_timer=new_tool_timer, tool_done=new_tool_done,
+                cycle_pickup_rem=new_cycle_pickup, cycle_face_rem=new_cycle_face,
             ), rew, 0.0
 
         def _skip(st): return st, 0.0, 0.0

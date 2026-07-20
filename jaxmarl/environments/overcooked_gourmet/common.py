@@ -242,6 +242,18 @@ class GourmetState:
     # cheese left in `remaining`. Reset to the recipe ingredients on collect.
     tool_ingr_remaining: chex.Array  # (MAX_TOOLS, MAX_INGR_PER_COMP) int32
 
+    # ── Per-delivery-cycle bootstrapping budgets (pickup + tool-face) ─────────
+    # Keyed by dispenser slot (each active dispenser vends one ingredient id).
+    # `cycle_budget_full[d]` = how many of dispenser d's ingredient the recipe
+    # needs (immutable). `cycle_pickup_rem` / `cycle_face_rem` are the remaining
+    # per-slot reward budgets this cycle; each is decremented when the matching
+    # bootstrapping reward is paid and refilled to `cycle_budget_full` on a
+    # delivery. The budget makes the (otherwise reversible, farmable) pickup and
+    # tool-face rewards fire at most `full` times per delivery cycle.
+    cycle_budget_full: chex.Array   # (MAX_DISP,)  int32
+    cycle_pickup_rem:  chex.Array   # (MAX_DISP,)  int32
+    cycle_face_rem:    chex.Array   # (MAX_DISP,)  int32
+
     # ── Plates ──────────────────────────────────────────────────────────────
     plate_pos:        chex.Array  # (MAX_PLATES, 2)              int32
     plate_on_counter: chex.Array  # (MAX_PLATES,)                bool
@@ -268,15 +280,42 @@ class GourmetState:
 # ---------------------------------------------------------------------------
 
 DELIVERY_REWARD        = 40
-WRONG_DELIVERY_PENALTY = 5    # small penalty on wrong-plate deliveries (Nate
-                              # 2026-07-20). Restored (was 0 since 2026-07-10) to
-                              # close the farm-and-dump loop: with the delivery-
-                              # gated tool refill, re-cooking a component requires
-                              # a delivery, so a nonzero penalty makes deliver-
-                              # wrong-to-reset net-negative and pushes the policy
-                              # toward correct assembly. Kept small (<< DELIVERY_
-                              # REWARD 40) so genuine near-miss attempts aren't
-                              # over-punished.
-INGREDIENT_IN_TOOL_REW = 0.5
-COMP_PICKUP_REW        = 1.5
+WRONG_DELIVERY_PENALTY = 5    # penalty on incomplete/wrong-plate deliveries.
+                              # With the delivery-gated tool refill, dumping an
+                              # incomplete plate to reset the tools is the only
+                              # farm vector for the per-event rewards below; this
+                              # penalty keeps that loop net-negative (for recipe
+                              # 41 the max partial shaping ~4.5 < 5).
+
+# ── Retained "step-through" reward staircase (Nate 2026-07-20) ───────────────
+# Reproduces the reward structure of the May-2026 working run (train_overcooked
+# --step_through_shaping, which delivered by update ~12). Each assembly step
+# pays a RETAINED reward the agent keeps — deposit -> collect -> plate-complete
+# -> deliver — so "assemble the full recipe and deliver it" is a monotone
+# staircase of reward, discoverable by exploration. This replaces the earlier
+# potential-based shaping, which was net-zero over any loop and therefore
+# clawed the completion reward back at the delivery step (actively discouraging
+# delivery — the reason the multi-recipe policy never delivered).
+#
+# Non-farmable WITHOUT a per-cycle budget because the env's delivery-gated tool
+# refill (overcooked_gourmet._case_collect_component / _case_deliver) already
+# acts as one: a tool's required-ingredient multiset is consumed on deposit and
+# only refilled on delivery, so each component can be cooked/collected exactly
+# once per delivery cycle. The plate multiset likewise caps collects. The sole
+# remaining exploit (dump-incomplete-to-refill) is covered by
+# WRONG_DELIVERY_PENALTY.
+INGREDIENT_IN_TOOL_REW = 0.5   # per valid ingredient deposited into a tool
+COMP_PICKUP_REW        = 1.5   # per cooked component collected onto a plate
+PLATE_COMPLETE_REW     = 5.0   # one-shot when a plate flips to a complete,
+                               # deliverable match for the recipe (retained;
+                               # detected via plate_complete false->true in
+                               # overcooked_gourmet.step_env)
+# Bootstrapping rewards that let a fresh policy get off the ground — they break
+# the long, unrewarded pickup->carry->deposit gap into steps (the old working
+# step_through run had these; omitting them left the agent stuck at ~0 assembly).
+# Both are per-dispenser-slot per-cycle budgeted (see GourmetState cycle_* fields)
+# so they cannot be farmed by pick/drop or face/unface loops.
+PICKUP_REW             = 0.1   # first pickup of each needed ingredient (per cycle)
+TOOL_FACE_REW          = 0.25  # holding a needed ingredient while facing the
+                               # tool that needs it (per needed ingredient, cycle)
 URGENCY_CUTOFF         = 40
