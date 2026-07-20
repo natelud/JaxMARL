@@ -268,10 +268,15 @@ class GourmetState:
 # ---------------------------------------------------------------------------
 
 DELIVERY_REWARD        = 40
-WRONG_DELIVERY_PENALTY = 0    # wrong-plate deliveries are unrewarded but no longer
-                              # penalised (Nate 2026-07-10 — the -10 biased the
-                              # deliveries-per-episode readout and punished exploration
-                              # in the multi-recipe curriculum)
+WRONG_DELIVERY_PENALTY = 5    # small penalty on wrong-plate deliveries (Nate
+                              # 2026-07-20). Restored (was 0 since 2026-07-10) to
+                              # close the farm-and-dump loop: with the delivery-
+                              # gated tool refill, re-cooking a component requires
+                              # a delivery, so a nonzero penalty makes deliver-
+                              # wrong-to-reset net-negative and pushes the policy
+                              # toward correct assembly. Kept small (<< DELIVERY_
+                              # REWARD 40) so genuine near-miss attempts aren't
+                              # over-punished.
 INGREDIENT_IN_TOOL_REW = 0.5
 COMP_PICKUP_REW        = 1.5
 URGENCY_CUTOFF         = 40

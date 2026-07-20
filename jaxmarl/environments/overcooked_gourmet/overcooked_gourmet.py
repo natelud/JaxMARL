@@ -993,18 +993,19 @@ class GourmetOvercooked(MultiAgentEnv):
             new_timer = jnp.where(valid, st.tool_timer.at[ti].set(-1), st.tool_timer)
             new_tdone = jnp.where(valid, st.tool_done.at[ti].set(False), st.tool_done)
             sh        = jnp.where(valid, float(COMP_PICKUP_REW), 0.0)
-            # Refill the tool's required-ingredient multiset so the next
-            # cooking cycle starts with a fresh remaining-set.
-            new_remaining = jnp.where(
-                valid,
-                st.tool_ingr_remaining.at[ti, :].set(st.recipe_comp_ingr[comp_i, :]),
-                st.tool_ingr_remaining,
-            )
+            # NOTE (Nate 2026-07-20): the tool's required-ingredient multiset is
+            # DELIBERATELY NOT refilled here. Collecting a component leaves the
+            # tool spent (its `tool_ingr_remaining` slots stay consumed at -1),
+            # so the same component cannot be re-cooked for reward until a
+            # DELIVERY refills every tool (_case_deliver). This closes the
+            # shaped-reward farm loop (re-cook one easy component forever) that
+            # trapped the multi-recipe policy at zero deliveries: with this gate
+            # the only way to reset a tool is to deliver the plate, so the
+            # policy is pushed toward assembling and delivering the full recipe.
 
             return st.replace(
                 plate_contents=new_pcon, plate_n_contents=new_pn, plate_complete=new_pcomp,
                 tool_n_contents=new_tn, tool_timer=new_timer, tool_done=new_tdone,
-                tool_ingr_remaining=new_remaining,
             ), 0.0, sh
 
         def _skip(st): return st, 0.0, 0.0
@@ -1034,6 +1035,22 @@ class GourmetOvercooked(MultiAgentEnv):
             new_pcomp  = jnp.where(delivery, st.plate_complete.at[pi].set(False), st.plate_complete)
             new_inv    = jnp.where(delivery, st.agent_inv.at[agent_idx].set(INV_EMPTY), st.agent_inv)
             new_pidx   = jnp.where(delivery, st.agent_plate_idx.at[agent_idx].set(-1), st.agent_plate_idx)
+
+            # Delivery-gated tool refill (Nate 2026-07-20): any delivery (complete
+            # or wrong) resets every active tool for the next dish — refills its
+            # required-ingredient multiset and clears its contents/timer/done.
+            # Refilling here (not on collect) is what makes each tool produce its
+            # component once per delivery cycle; re-cooking requires delivering,
+            # so with WRONG_DELIVERY_PENALTY>0 the deliver-wrong-to-reset farm is
+            # net-negative and the policy is pushed to assemble the full recipe.
+            safe_comp   = jnp.where(st.tool_comp_idx >= 0, st.tool_comp_idx, 0)
+            refill_rem  = st.recipe_comp_ingr[safe_comp]              # (MAX_TOOLS, MI)
+            act2d       = st.tool_active[:, None]
+            new_tool_rem   = jnp.where(delivery & act2d, refill_rem, st.tool_ingr_remaining)
+            new_tool_n     = jnp.where(delivery & st.tool_active, 0,     st.tool_n_contents)
+            new_tool_timer = jnp.where(delivery & st.tool_active, -1,    st.tool_timer)
+            new_tool_done  = jnp.where(delivery & st.tool_active, False, st.tool_done)
+
             # Sparse reward: +DELIVERY_REWARD on a complete-plate delivery,
             # -WRONG_DELIVERY_PENALTY on an incomplete/wrong-plate delivery,
             # 0 otherwise (no plate held → no-op delivery action).
@@ -1046,6 +1063,8 @@ class GourmetOvercooked(MultiAgentEnv):
                 plate_exists=new_exists, plate_on_counter=new_on_ctr,
                 plate_contents=new_pcon, plate_n_contents=new_pn, plate_complete=new_pcomp,
                 agent_inv=new_inv, agent_plate_idx=new_pidx,
+                tool_ingr_remaining=new_tool_rem, tool_n_contents=new_tool_n,
+                tool_timer=new_tool_timer, tool_done=new_tool_done,
             ), rew, 0.0
 
         def _skip(st): return st, 0.0, 0.0
