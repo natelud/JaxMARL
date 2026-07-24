@@ -141,6 +141,7 @@ class GourmetOvercooked(MultiAgentEnv):
         expanded_actions: bool = False,
         restrict_ingredient_drops: bool = False,
         recipe_db_path: Optional[str] = None,
+        wrong_delivery_penalty: float = 0.0,
     ):
         """
         Initialise GourmetOvercooked from a pre-built layout FrozenDict.
@@ -158,6 +159,11 @@ class GourmetOvercooked(MultiAgentEnv):
         expanded_actions, recipe_db_path : standard env knobs.
         """
         super().__init__(num_agents=num_agents)
+
+        # Reward delta applied on an incomplete/wrong-plate delivery. Default
+        # 0.0 = NO wrong-delivery penalty; set NEGATIVE (e.g. -5.0) to penalise
+        # wrong deliveries (the old behaviour was -WRONG_DELIVERY_PENALTY = -5).
+        self.wrong_delivery_penalty = float(wrong_delivery_penalty)
 
         if layout is None:
             raise ValueError(
@@ -1159,11 +1165,12 @@ class GourmetOvercooked(MultiAgentEnv):
             new_cycle_face   = jnp.where(delivery, st.cycle_budget_full, st.cycle_face_rem)
 
             # Sparse reward: +DELIVERY_REWARD on a complete-plate delivery,
-            # -WRONG_DELIVERY_PENALTY on an incomplete/wrong-plate delivery,
+            # self.wrong_delivery_penalty (a reward delta, default 0.0, set
+            # negative to penalise) on an incomplete/wrong-plate delivery,
             # 0 otherwise (no plate held → no-op delivery action).
             rew        = (
-                jnp.where(paid,           float(DELIVERY_REWARD),         0.0)
-              + jnp.where(wrong_delivery, -float(WRONG_DELIVERY_PENALTY), 0.0)
+                jnp.where(paid,           float(DELIVERY_REWARD),        0.0)
+              + jnp.where(wrong_delivery, self.wrong_delivery_penalty,   0.0)
             )
 
             return st.replace(
