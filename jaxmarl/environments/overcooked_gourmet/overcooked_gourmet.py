@@ -142,6 +142,7 @@ class GourmetOvercooked(MultiAgentEnv):
         restrict_ingredient_drops: bool = False,
         recipe_db_path: Optional[str] = None,
         wrong_delivery_penalty: float = 0.0,
+        refill_on_wrong_delivery: bool = False,
     ):
         """
         Initialise GourmetOvercooked from a pre-built layout FrozenDict.
@@ -164,6 +165,15 @@ class GourmetOvercooked(MultiAgentEnv):
         # 0.0 = NO wrong-delivery penalty; set NEGATIVE (e.g. -5.0) to penalise
         # wrong deliveries (the old behaviour was -WRONG_DELIVERY_PENALTY = -5).
         self.wrong_delivery_penalty = float(wrong_delivery_penalty)
+
+        # Whether a WRONG (incomplete/mismatched) delivery also refills the
+        # tools + per-cycle budgets. False (default) = only a CORRECT delivery
+        # refills, which closes the dump-incomplete-to-refill farm structurally,
+        # so no wrong-delivery penalty is needed to keep the loop net-negative.
+        # True = legacy behaviour (any delivery refills), which REQUIRES a
+        # negative wrong_delivery_penalty or the shaping staircase is farmable.
+        # See kg-rl-docs subsystems/multirecipe-curriculum.md.
+        self.refill_on_wrong_delivery = bool(refill_on_wrong_delivery)
 
         if layout is None:
             raise ValueError(
@@ -1144,25 +1154,39 @@ class GourmetOvercooked(MultiAgentEnv):
             new_inv    = jnp.where(delivery, st.agent_inv.at[agent_idx].set(INV_EMPTY), st.agent_inv)
             new_pidx   = jnp.where(delivery, st.agent_plate_idx.at[agent_idx].set(-1), st.agent_plate_idx)
 
-            # Delivery-gated tool refill (Nate 2026-07-20): any delivery (complete
-            # or wrong) resets every active tool for the next dish — refills its
+            # Refill gate (static Python branch — self.refill_on_wrong_delivery
+            # is a plain bool, so this picks a traced array at trace time).
+            # Default: only a CORRECT delivery (`paid`) refills.
+            refill_gate = delivery if self.refill_on_wrong_delivery else paid
+
+            # Delivery-gated tool refill (Nate 2026-07-20): a delivery resets
+            # every active tool for the next dish — refills its
             # required-ingredient multiset and clears its contents/timer/done.
             # Refilling here (not on collect) is what makes each tool produce its
-            # component once per delivery cycle; re-cooking requires delivering,
-            # so with WRONG_DELIVERY_PENALTY>0 the deliver-wrong-to-reset farm is
-            # net-negative and the policy is pushed to assemble the full recipe.
+            # component once per delivery cycle; re-cooking requires delivering.
+            # WHICH deliveries refill is set by `refill_on_wrong_delivery`
+            # (default False → only CORRECT deliveries, see `refill_gate` above):
+            #   * False (default): a wrong dump does NOT refill, so the
+            #     dump-to-reset farm is structurally impossible and no
+            #     wrong-delivery penalty is needed. Preferred — a penalty large
+            #     enough to kill the farm also teaches goal-avoidance (measured:
+            #     job 7682 assembled plates but stopped approaching the goal
+            #     entirely, never earning the +40).
+            #   * True (legacy): any delivery refills; then the staircase IS
+            #     farmable and REQUIRES wrong_delivery_penalty < -(per-cycle
+            #     shaping) to stay net-negative.
             safe_comp   = jnp.where(st.tool_comp_idx >= 0, st.tool_comp_idx, 0)
             refill_rem  = st.recipe_comp_ingr[safe_comp]              # (MAX_TOOLS, MI)
             act2d       = st.tool_active[:, None]
-            new_tool_rem   = jnp.where(delivery & act2d, refill_rem, st.tool_ingr_remaining)
-            new_tool_n     = jnp.where(delivery & st.tool_active, 0,     st.tool_n_contents)
-            new_tool_timer = jnp.where(delivery & st.tool_active, -1,    st.tool_timer)
-            new_tool_done  = jnp.where(delivery & st.tool_active, False, st.tool_done)
+            new_tool_rem   = jnp.where(refill_gate & act2d, refill_rem, st.tool_ingr_remaining)
+            new_tool_n     = jnp.where(refill_gate & st.tool_active, 0,     st.tool_n_contents)
+            new_tool_timer = jnp.where(refill_gate & st.tool_active, -1,    st.tool_timer)
+            new_tool_done  = jnp.where(refill_gate & st.tool_active, False, st.tool_done)
 
             # Refill the per-cycle pickup / tool-face bootstrapping budgets so
-            # the next dish can re-earn them (same timing as the tool refill).
-            new_cycle_pickup = jnp.where(delivery, st.cycle_budget_full, st.cycle_pickup_rem)
-            new_cycle_face   = jnp.where(delivery, st.cycle_budget_full, st.cycle_face_rem)
+            # the next dish can re-earn them (same gate/timing as the tool refill).
+            new_cycle_pickup = jnp.where(refill_gate, st.cycle_budget_full, st.cycle_pickup_rem)
+            new_cycle_face   = jnp.where(refill_gate, st.cycle_budget_full, st.cycle_face_rem)
 
             # Sparse reward: +DELIVERY_REWARD on a complete-plate delivery,
             # self.wrong_delivery_penalty (a reward delta, default 0.0, set
