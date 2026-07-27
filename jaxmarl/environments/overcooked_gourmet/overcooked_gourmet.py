@@ -143,6 +143,7 @@ class GourmetOvercooked(MultiAgentEnv):
         recipe_db_path: Optional[str] = None,
         wrong_delivery_penalty: float = 0.0,
         refill_on_wrong_delivery: bool = False,
+        goal_approach_rew: float = 0.0,
     ):
         """
         Initialise GourmetOvercooked from a pre-built layout FrozenDict.
@@ -174,6 +175,21 @@ class GourmetOvercooked(MultiAgentEnv):
         # negative wrong_delivery_penalty or the shaping staircase is farmable.
         # See kg-rl-docs subsystems/multirecipe-curriculum.md.
         self.refill_on_wrong_delivery = bool(refill_on_wrong_delivery)
+
+        # Per-cell reward for carrying a COMPLETE plate closer to the goal.
+        # 0.0 (default) = off. This is a TELESCOPING term, k*(d_before-d_after),
+        # gated on the agent holding a complete plate in BOTH the pre- and
+        # post-step state, so:
+        #   * it nets exactly zero over any closed loop (walk away = pay back)
+        #     -> unfarmable, unlike a flat "near the goal" bonus;
+        #   * the delivery step itself contributes 0 (post-state holds no plate,
+        #     so the gate is False) -> NO clawback of the staircase at delivery,
+        #     which is what sank the earlier potential-based shaping attempt.
+        # Purpose: the +40 delivery was too rare to learn from (measured job
+        # 9224: delivery occurred in ~0.35% of episodes at its peak, by chance,
+        # then vanished as entropy annealed). This turns "stumble onto the goal"
+        # into a followable gradient.
+        self.goal_approach_rew = float(goal_approach_rew)
 
         if layout is None:
             raise ValueError(
@@ -681,6 +697,8 @@ class GourmetOvercooked(MultiAgentEnv):
         # common.py) + WRONG_DELIVERY_PENALTY.
         complete_before = state.plate_complete
         pre_inv         = state.agent_inv
+        pre_pos         = state.agent_pos
+        pre_plate_idx   = state.agent_plate_idx
         state, reward, shaped = self._step_agents(key, state, acts)
         newly_complete = jnp.sum(
             (state.plate_complete & ~complete_before).astype(jnp.float32)
@@ -694,6 +712,24 @@ class GourmetOvercooked(MultiAgentEnv):
         # un-farmable (no pick/drop or face/unface loop).
         state, boot = self._bootstrap_rewards(state, pre_inv)
         shaped = shaped + boot
+
+        # Goal-approach shaping (off unless goal_approach_rew != 0). Telescoping
+        # k*(d_before - d_after) on Manhattan distance to the (pinned) goal,
+        # gated on holding a COMPLETE plate in BOTH states — see __init__.
+        if self.goal_approach_rew != 0.0:
+            def _holds_complete(pidx, pcomp):
+                held = pidx >= 0
+                safe = jnp.where(held, pidx, 0)
+                return held & pcomp[safe]          # (num_agents,) bool
+
+            gate = (_holds_complete(pre_plate_idx, complete_before)
+                    & _holds_complete(state.agent_plate_idx, state.plate_complete))
+            g    = state.goal_pos[0]               # runs pin a single serving window
+            d_b  = jnp.abs(pre_pos - g).sum(-1).astype(jnp.float32)
+            d_a  = jnp.abs(state.agent_pos - g).sum(-1).astype(jnp.float32)
+            shaped = shaped + jnp.where(
+                gate, self.goal_approach_rew * (d_b - d_a), 0.0
+            )
 
         state = state.replace(time=state.time + 1)
         done  = self.is_terminal(state)
